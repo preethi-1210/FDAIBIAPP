@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ryze
+      POSTGRES_PASSWORD: ryze
+      POSTGRES_DB: ryze_bi
+    ports:
+      - "5432:5432"
+    volumes:
+      - ryze_pg:/var/lib/postgresql/data
+
+volumes:
+  ryze_pg:

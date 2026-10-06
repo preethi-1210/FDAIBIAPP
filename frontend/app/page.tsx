@@ -1,0 +1,545 @@
+"use client";
+
+import {
+  AnimatePresence,
+  motion,
+  useReducedMotion,
+} from "framer-motion";
+import {
+  ArrowDown,
+  ArrowRight,
+  BarChart3,
+  Check,
+  ChevronDown,
+  CircleHelp,
+  Eye,
+  EyeOff,
+  LockKeyhole,
+  Menu,
+  Sparkles,
+  Store,
+  WalletCards,
+  X,
+} from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { API_URL } from "@/lib/api";
+
+type Business = "Retail" | "SaaS" | "Finance";
+type Domain = { id: string; label: string };
+type DemoUser = { username: string; domain: string; password_hint: string };
+
+const BUSINESS_METRICS: Record<Business, { label: string; value: string; change: string; points: string }> = {
+  Retail: { label: "Gross merchandise value", value: "$248,390", change: "+18.6%", points: "8,128 72,102 138,116 205,66 271,79 338,43 404,58 470,22 536,38 602,12" },
+  SaaS: { label: "Monthly recurring revenue", value: "$92,840", change: "+12.4%", points: "8,115 72,89 138,98 205,72 271,87 338,49 404,55 470,30 536,42 602,14" },
+  Finance: { label: "Assets under management", value: "$8.42M", change: "+9.2%", points: "8,124 72,106 138,85 205,97 271,69 338,77 404,48 470,63 536,31 602,12" },
+};
+
+const AI_INSIGHT =
+  "Online revenue is up 18.6% this month. Repeat customers are driving the strongest growth in the West region.";
+
+const riseIn = {
+  hidden: { opacity: 0, y: 24 },
+  visible: { opacity: 1, y: 0 },
+};
+
+const staggerIn = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.11, delayChildren: 0.12 } },
+};
+
+export default function LandingPage() {
+  const router = useRouter();
+  const reduceMotion = useReducedMotion();
+  const [business, setBusiness] = useState<Business>("Retail");
+  const [showLogin, setShowLogin] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [typedInsight, setTypedInsight] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [domain, setDomain] = useState("retail");
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [users, setUsers] = useState<DemoUser[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const loginDialogRef = useRef<HTMLElement | null>(null);
+  const metrics = BUSINESS_METRICS[business];
+  const transition = reduceMotion ? { duration: 0 } : { duration: 0.55, ease: [0.22, 1, 0.36, 1] as const };
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("login")) {
+      setShowLogin(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (reduceMotion) {
+      setTypedInsight(AI_INSIGHT);
+      return;
+    }
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index += 2;
+      setTypedInsight(AI_INSIGHT.slice(0, index));
+      if (index >= AI_INSIGHT.length) window.clearInterval(timer);
+    }, 28);
+    return () => window.clearInterval(timer);
+  }, [reduceMotion]);
+
+  useEffect(() => {
+    if (!showLogin) return;
+    let cancelled = false;
+    fetch(`${API_URL}/auth/domains`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Could not load sign-in options (${response.status})`);
+        return response.json();
+      })
+      .then((body: { domains?: Domain[]; users?: DemoUser[] }) => {
+        if (cancelled) return;
+        setDomains(body.domains ?? []);
+        setUsers(body.users ?? []);
+        setError("");
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : "Could not connect to the sign-in service.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showLogin]);
+
+  useEffect(() => {
+    if (!showLogin) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = loginDialogRef.current;
+    const focusable = () => dialog?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    );
+    focusable()?.[0]?.focus();
+    const containDialogFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowLogin(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items?.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", containDialogFocus);
+    return () => {
+      window.removeEventListener("keydown", containDialogFocus);
+      previousFocus?.focus();
+    };
+  }, [showLogin]);
+
+  async function onLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, domain }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || "Sign-in failed");
+      localStorage.setItem("ryze_token", body.access_token);
+      localStorage.setItem("ryze_user", body.username);
+      localStorage.setItem("ryze_domain", body.domain);
+      localStorage.setItem("ryze_role", body.role);
+      router.push("/dashboard");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-in failed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openLogin() {
+    setMenuOpen(false);
+    setShowLogin(true);
+  }
+
+  return (
+    <main className="fd-landing relative min-h-screen overflow-hidden bg-[#070b14] text-slate-100 selection:bg-cyan-300/30">
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="landing-orb landing-orb--cyan" />
+        <div className="landing-orb landing-orb--violet" />
+        <div className="landing-grid absolute inset-0 opacity-30" />
+      </div>
+
+      <header className="fd-header relative z-20 mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8">
+        <a href="#" className="fd-brand flex items-center gap-3" aria-label="FD AIBI home">
+          <span className="grid size-10 place-items-center rounded-xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-200 shadow-[0_0_28px_rgba(34,211,238,0.12)]">
+            <BarChart3 size={21} />
+          </span>
+          <span className="text-sm font-semibold tracking-[0.16em] text-white">FD <span className="text-cyan-300">AIBI</span></span>
+        </a>
+        <nav className="hidden items-center gap-8 text-sm text-slate-400 md:flex" aria-label="Main navigation">
+          <a className="transition hover:text-white" href="#platform">Platform</a>
+          <a className="transition hover:text-white" href="#businesses">Businesses</a>
+          <a className="transition hover:text-white" href="#demo">Live demo</a>
+        </nav>
+        <div className="hidden items-center gap-3 md:flex">
+          <button onClick={openLogin} className="rounded-lg px-4 py-2 text-sm text-slate-300 transition hover:text-white">Log in</button>
+          <button onClick={openLogin} className="rounded-lg border border-cyan-200/25 bg-cyan-300/10 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:border-cyan-200/50 hover:bg-cyan-300/15">
+            Get started <ArrowRight className="ml-1 inline" size={15} />
+          </button>
+        </div>
+        <button
+          type="button"
+          className="grid size-10 place-items-center rounded-lg border border-white/10 text-slate-200 md:hidden"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          {menuOpen ? <X size={20} /> : <Menu size={20} />}
+        </button>
+        <AnimatePresence>
+          {menuOpen && (
+            <motion.nav
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="absolute left-4 right-4 top-[72px] grid gap-1 rounded-2xl border border-white/10 bg-slate-950/95 p-3 shadow-2xl backdrop-blur-xl md:hidden"
+              aria-label="Mobile navigation"
+            >
+              <a onClick={() => setMenuOpen(false)} className="rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-white/5" href="#platform">Platform</a>
+              <a onClick={() => setMenuOpen(false)} className="rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-white/5" href="#businesses">Businesses</a>
+              <button onClick={openLogin} className="rounded-lg px-3 py-3 text-left text-sm text-cyan-200 hover:bg-white/5">Login / Get Started</button>
+            </motion.nav>
+          )}
+        </AnimatePresence>
+      </header>
+
+      <section id="platform" className="fd-hero-section relative z-10 mx-auto grid max-w-7xl items-center gap-14 px-5 pb-20 pt-12 sm:px-8 md:min-h-[670px] md:grid-cols-[0.92fr_1.08fr] md:gap-10 md:pb-28 md:pt-16">
+        <motion.div variants={staggerIn} initial="hidden" animate="visible" className="fd-hero-copy relative z-10">
+          <motion.div variants={riseIn} transition={transition} className="mb-6 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/[0.06] px-3 py-1.5 text-xs font-medium text-cyan-200">
+            <Sparkles size={14} /> One intelligent view across your business
+          </motion.div>
+          <motion.h1 variants={riseIn} transition={transition} className="fd-hero-title max-w-2xl text-5xl font-semibold leading-[1.04] tracking-[-0.055em] text-white sm:text-6xl lg:text-[4.5rem]">
+            FD AIBI
+            <span className="mt-2 block bg-gradient-to-r from-indigo-300 via-cyan-300 to-teal-200 bg-clip-text pb-2 text-transparent">analytics platform</span>
+          </motion.h1>
+          <motion.p variants={riseIn} transition={transition} className="mt-6 max-w-xl text-base leading-7 text-slate-400 sm:text-lg sm:leading-8">
+            A multi-tenant, multi-business AI analytics platform that turns trusted data into clear answers for every team, domain, and decision.
+          </motion.p>
+          <motion.div variants={riseIn} transition={transition} className="mt-8 flex flex-wrap gap-3">
+            <a href="#demo" className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_rgba(34,211,238,.2)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_38px_rgba(34,211,238,.28)]">
+              Watch Demo <ArrowDown size={16} className="transition group-hover:translate-y-0.5" />
+            </a>
+            <button onClick={openLogin} className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.035] px-5 py-3 text-sm font-semibold text-slate-100 transition hover:border-cyan-200/40 hover:bg-white/[0.07]">
+              Login / Get Started <ArrowRight size={16} />
+            </button>
+          </motion.div>
+          <motion.div variants={riseIn} transition={transition} className="mt-9 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
+            <span className="inline-flex items-center gap-1.5"><Check size={14} className="text-emerald-300" /> Governed data access</span>
+            <span className="inline-flex items-center gap-1.5"><Check size={14} className="text-emerald-300" /> Built for multiple domains</span>
+          </motion.div>
+        </motion.div>
+
+        <DashboardDemo business={business} setBusiness={setBusiness} metrics={metrics} typedInsight={typedInsight} />
+      </section>
+
+      <section id="businesses" className="fd-business-section relative z-10 border-y border-white/[0.07] bg-white/[0.018]">
+        <div className="mx-auto grid max-w-7xl gap-8 px-5 py-12 sm:px-8 md:grid-cols-[0.7fr_1.3fr] md:items-center md:py-14">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-[0.2em] text-cyan-300/75">One platform. Every business.</p>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">Switch contexts, not tools.</h2>
+            <p className="mt-3 max-w-lg text-sm leading-6 text-slate-400">Keep business-specific metrics and access in view while your analytics workflow stays consistent.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {([
+              { title: "Retail", desc: "Sales, stores & customers", icon: Store, color: "text-cyan-300", glow: "border-cyan-300/15" },
+              { title: "SaaS", desc: "Revenue, growth & churn", icon: BarChart3, color: "text-violet-300", glow: "border-violet-300/15" },
+              { title: "Finance", desc: "AUM, flows & risk", icon: WalletCards, color: "text-emerald-300", glow: "border-emerald-300/15" },
+            ] as const).map(({ title, desc, icon: Icon, color, glow }, index) => (
+              <motion.button
+                key={title}
+                type="button"
+                onClick={() => setBusiness(title)}
+                whileHover={reduceMotion ? undefined : { y: -4 }}
+                whileTap={reduceMotion ? undefined : { scale: 0.98 }}
+                className={`fd-business-card rounded-2xl border ${glow} ${business === title ? "bg-white/[0.065]" : "bg-white/[0.025]"} p-4 text-left transition hover:bg-white/[0.07]`}
+                aria-pressed={business === title}
+              >
+                <motion.span animate={reduceMotion ? undefined : { y: [0, -3, 0] }} transition={{ duration: 3 + index * 0.4, repeat: Infinity, ease: "easeInOut" }} className={`mb-4 grid size-10 place-items-center rounded-xl bg-white/[0.055] ${color}`}>
+                  <Icon size={19} />
+                </motion.span>
+                <span className="block text-sm font-semibold text-white">{title}</span>
+                <span className="mt-1 block text-xs text-slate-500">{desc}</span>
+              </motion.button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="fd-features relative z-10 mx-auto grid max-w-7xl gap-4 px-5 py-14 sm:px-8 md:grid-cols-3 md:py-20">
+        <Feature title="Ask in plain language" detail="Let teams explore governed business data without starting with a blank SQL editor." />
+        <Feature title="Insights with context" detail="Connect metrics, trends, and business definitions in one clear analytics workflow." />
+        <Feature title="Designed for each tenant" detail="Keep domain-specific views and access patterns organized as your business grows." />
+      </section>
+
+      <footer className="fd-footer relative z-10 border-t border-white/[0.07] px-5 py-7 text-center text-xs text-slate-600">
+        FD AIBI Analytics Platform · One view for every business.
+      </footer>
+
+      <AnimatePresence>
+        {showLogin && (
+          <motion.div
+            className="fd-login-backdrop fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-[#03060b]/75 p-4 backdrop-blur-md"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.22 }}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setShowLogin(false);
+            }}
+            role="presentation"
+          >
+            <motion.section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="login-title"
+              aria-describedby="login-description"
+              ref={loginDialogRef}
+              initial={{ opacity: 0, x: 48, scale: 0.97 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 32, scale: 0.98 }}
+              transition={transition}
+              className="fd-login-card relative my-auto w-full max-w-md rounded-3xl border border-white/15 bg-slate-950/80 p-6 shadow-[0_0_80px_rgba(34,211,238,.11)] backdrop-blur-2xl sm:p-8"
+            >
+              <button type="button" onClick={() => setShowLogin(false)} className="absolute right-4 top-4 grid size-9 place-items-center rounded-xl text-slate-400 transition hover:bg-white/[0.07] hover:text-white" aria-label="Close login dialog">
+                <X size={18} />
+              </button>
+              <div className="mb-6 grid size-12 place-items-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-200"><LockKeyhole size={21} /></div>
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-300/80">Welcome to FD AIBI</p>
+              <h2 id="login-title" className="mt-2 text-2xl font-semibold tracking-tight text-white">Sign in to your workspace</h2>
+              <p id="login-description" className="mt-2 text-sm text-slate-400">Choose your business and continue to your analytics workspace.</p>
+
+              <form onSubmit={onLogin} className="fd-login-form mt-7 space-y-4">
+                <label className="block text-sm text-slate-300">
+                  Business domain
+                  <span className="relative mt-2 block">
+                    <select
+                      value={domain}
+                      onChange={(event) => setDomain(event.target.value)}
+                      className="fd-login-field login-field w-full appearance-none"
+                      required
+                    >
+                      {domains.length ? domains.map((item) => <option key={item.id} value={item.id}>{item.label}</option>) : <option value="retail">Retail</option>}
+                    </select>
+                    <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                  </span>
+                </label>
+                <label className="block text-sm text-slate-300">
+                  Username
+                  <input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} className="fd-login-field login-field mt-2 w-full" placeholder="Enter your username" />
+                </label>
+                <label className="block text-sm text-slate-300">
+                  Password
+                  <span className="relative mt-2 block">
+                    <input type={showPassword ? "text" : "password"} autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} className="fd-login-field login-field w-full pr-11" placeholder="Enter your password" />
+                    <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-slate-200" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>
+                      {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                    </button>
+                  </span>
+                </label>
+                {error && <p role="alert" className="rounded-xl border border-rose-400/20 bg-rose-400/[0.07] px-3 py-2.5 text-sm text-rose-200">{error}</p>}
+                <button type="submit" disabled={busy} className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_6px_24px_rgba(34,211,238,.17)] transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60">
+                  {busy ? "Signing in…" : "Continue to workspace"} {!busy && <ArrowRight size={16} className="transition group-hover:translate-x-0.5" />}
+                </button>
+              </form>
+              {users.length > 0 && (
+                <div className="mt-5 border-t border-white/[0.08] pt-4">
+                  <p className="mb-2 text-xs text-slate-500">Demo accounts</p>
+                  <div className="flex flex-wrap gap-2">
+                    {users.map((user) => (
+                      <button
+                        type="button"
+                        key={user.username}
+                        onClick={() => {
+                          setUsername(user.username);
+                          setPassword(user.password_hint);
+                          if (user.domain !== "all") setDomain(user.domain);
+                        }}
+                        className="rounded-lg border border-white/10 bg-white/[0.035] px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-cyan-200/25 hover:text-cyan-100"
+                      >
+                        {user.username}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <p className="mt-5 flex items-start gap-2 text-[11px] leading-5 text-slate-500">
+                <CircleHelp size={14} className="mt-0.5 shrink-0" /> Sign-in credentials are sent only to this workspace&apos;s configured API.
+              </p>
+            </motion.section>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </main>
+  );
+}
+
+function DashboardDemo({
+  business,
+  setBusiness,
+  metrics,
+  typedInsight,
+}: {
+  business: Business;
+  setBusiness: (business: Business) => void;
+  metrics: (typeof BUSINESS_METRICS)[Business];
+  typedInsight: string;
+}) {
+  const reduceMotion = useReducedMotion();
+  const metricValues: Record<Business, [string, string, string]> = {
+    Retail: ["12.8k", "4.6%", "3.2 days"],
+    SaaS: ["3.4k", "7.1%", "2.4 days"],
+    Finance: ["8.4M", "2.3%", "1.8 days"],
+  };
+
+  return (
+    <motion.div
+      id="demo"
+      initial={{ opacity: 0, y: 24, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: reduceMotion ? 0 : 0.8, delay: reduceMotion ? 0 : 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className="relative mx-auto w-full max-w-[660px] scroll-mt-8"
+    >
+      <motion.div aria-hidden="true" animate={reduceMotion ? undefined : { y: [0, -9, 0] }} transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }} className="absolute -right-3 -top-7 z-20 hidden rounded-xl border border-cyan-200/20 bg-slate-900/90 px-3 py-2 shadow-[0_10px_35px_rgba(34,211,238,.12)] backdrop-blur-xl sm:block">
+        <div className="flex items-center gap-2 text-xs text-slate-300"><span className="size-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_#6ee7b7]" /> Live data connected</div>
+      </motion.div>
+      <motion.div aria-hidden="true" animate={reduceMotion ? undefined : { y: [0, 8, 0] }} transition={{ duration: 5.2, repeat: Infinity, ease: "easeInOut", delay: 0.4 }} className="absolute -bottom-7 -left-4 z-20 hidden rounded-xl border border-violet-200/15 bg-slate-900/90 px-3 py-2 shadow-[0_10px_35px_rgba(167,139,250,.12)] backdrop-blur-xl sm:block">
+        <div className="flex items-center gap-2 text-xs text-slate-300"><Sparkles size={13} className="text-violet-300" /> AI analysis complete</div>
+      </motion.div>
+
+      <div className="fd-demo-window overflow-hidden rounded-[26px] border border-white/[0.13] bg-[#0d1421]/95 shadow-[0_28px_100px_rgba(0,0,0,.45),0_0_70px_rgba(79,70,229,.12)]">
+        <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3.5 sm:px-5">
+          <div className="flex items-center gap-2">
+            <span className="flex gap-1.5"><i className="size-2 rounded-full bg-rose-400/80" /><i className="size-2 rounded-full bg-amber-300/80" /><i className="size-2 rounded-full bg-emerald-300/80" /></span>
+            <span className="ml-2 text-xs text-slate-400">Analytics workspace</span>
+          </div>
+          <span className="hidden items-center gap-1.5 text-[10px] text-slate-500 sm:flex"><span className="size-1.5 animate-pulse rounded-full bg-emerald-300" /> Updated just now</span>
+        </div>
+
+        <div className="p-4 sm:p-6">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Business overview</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Good morning, Alex</h2>
+            </div>
+            <label className="relative inline-flex items-center">
+              <span className="sr-only">Choose demo business</span>
+              <select value={business} onChange={(event) => setBusiness(event.target.value as Business)} className="appearance-none rounded-lg border border-white/10 bg-white/[0.045] py-2 pl-3 pr-9 text-xs text-slate-200 outline-none transition hover:border-cyan-200/30 focus:border-cyan-200/50">
+                {(["Retail", "SaaS", "Finance"] as const).map((item) => <option className="bg-slate-900" key={item}>{item}</option>)}
+              </select>
+              <ChevronDown size={14} className="pointer-events-none absolute right-3 text-slate-500" />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2.5 sm:gap-3">
+            <MetricCard label={metrics.label} value={metrics.value} change={metrics.change} accent="cyan" />
+            <MetricCard label="Active customers" value={metricValues[business][0]} change="+8.2%" accent="violet" />
+            <MetricCard label="Conversion rate" value={metricValues[business][1]} change="+1.4%" accent="emerald" />
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-3.5 sm:p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div><p className="text-xs font-medium text-slate-200">Performance trend</p><p className="mt-0.5 text-[10px] text-slate-500">Revenue · last 30 days</p></div>
+              <span className="rounded-md bg-emerald-300/10 px-2 py-1 text-[10px] font-medium text-emerald-200">{metrics.change}</span>
+            </div>
+            <div className="relative h-32 w-full">
+              <svg viewBox="0 0 610 145" preserveAspectRatio="none" className="h-full w-full overflow-visible" role="img" aria-label={`${business} performance trend line chart`}>
+                <defs>
+                  <linearGradient id="chartArea" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22d3ee" stopOpacity=".22" /><stop offset="100%" stopColor="#22d3ee" stopOpacity="0" /></linearGradient>
+                  <linearGradient id="chartStroke" x1="0" x2="1" y1="0" y2="0"><stop offset="0%" stopColor="#818cf8" /><stop offset="100%" stopColor="#22d3ee" /></linearGradient>
+                </defs>
+                {[25, 62, 99, 136].map((y) => <line key={y} x1="0" x2="610" y1={y} y2={y} stroke="rgba(148,163,184,.12)" strokeDasharray="3 6" />)}
+                <motion.path
+                  d={`M ${metrics.points} L 602 145 L 8 145 Z`}
+                  fill="url(#chartArea)"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 1.3, delay: 0.7 }}
+                />
+                <motion.polyline
+                  points={metrics.points}
+                  fill="none"
+                  stroke="url(#chartStroke)"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  initial={{ pathLength: 0, opacity: 0.6 }}
+                  animate={{ pathLength: 1, opacity: 1 }}
+                  transition={{ duration: 1.7, delay: 0.55, ease: "easeInOut" }}
+                />
+                <motion.circle cx="602" cy={business === "Retail" ? "12" : business === "SaaS" ? "14" : "12"} r="4.5" fill="#67e8f9" initial={{ scale: 0 }} animate={{ scale: [0.8, 1.2, 1] }} transition={{ delay: 2, duration: 0.45 }} />
+              </svg>
+            </div>
+            <div className="mt-1 flex justify-between text-[9px] text-slate-600"><span>01 JUN</span><span>08 JUN</span><span>15 JUN</span><span>22 JUN</span><span>30 JUN</span></div>
+          </div>
+
+          <motion.div layout className="mt-3 flex gap-3 rounded-2xl border border-cyan-200/15 bg-gradient-to-r from-indigo-400/[0.08] to-cyan-300/[0.055] p-3.5 sm:p-4">
+            <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-cyan-200/15 bg-cyan-200/[0.08] text-cyan-200"><Sparkles size={15} /></span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-xs font-medium text-cyan-100">
+                AI insight
+                <span className="inline-flex items-center gap-1 text-[9px] font-normal text-slate-500"><span className="size-1 rounded-full bg-cyan-300 shadow-[0_0_8px_#67e8f9]" /> analyzing</span>
+              </div>
+              <p className="mt-1.5 min-h-9 text-[11px] leading-5 text-slate-300 sm:text-xs">
+                {business === "Retail" ? typedInsight : business === "SaaS"
+                  ? "Monthly recurring revenue is growing steadily, led by improved retention among mid-market accounts."
+                  : "Assets under management continue to rise, with balanced growth across managed portfolios."}
+                {business === "Retail" && typedInsight.length < AI_INSIGHT.length && <span className="ml-0.5 inline-block h-3.5 w-px animate-pulse bg-cyan-300 align-middle" />}
+              </p>
+            </div>
+          </motion.div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function MetricCard({ label, value, change, accent }: { label: string; value: string; change: string; accent: "cyan" | "violet" | "emerald" }) {
+  const accentClass = {
+    cyan: "text-cyan-200 bg-cyan-300/10",
+    violet: "text-violet-200 bg-violet-300/10",
+    emerald: "text-emerald-200 bg-emerald-300/10",
+  }[accent];
+
+  return (
+    <motion.div layout className="min-w-0 rounded-xl border border-white/[0.075] bg-white/[0.025] p-2.5 sm:p-3">
+      <p className="truncate text-[9px] leading-4 text-slate-500 sm:text-[10px]">{label}</p>
+      <p className="mt-1 truncate text-sm font-semibold tracking-tight text-white sm:text-lg">{value}</p>
+      <span className={`mt-1 inline-flex rounded px-1.5 py-0.5 text-[9px] ${accentClass}`}>{change}</span>
+    </motion.div>
+  );
+}
+
+function Feature({ title, detail }: { title: string; detail: string }) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <motion.article
+      whileHover={reduceMotion ? undefined : { y: -4 }}
+      className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5 transition-colors hover:border-cyan-200/20 hover:bg-white/[0.04]"
+    >
+      <span className="mb-4 grid size-9 place-items-center rounded-xl border border-cyan-200/15 bg-cyan-200/[0.07] text-cyan-200"><Check size={17} /></span>
+      <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-400">{detail}</p>
+    </motion.article>
+  );
+}

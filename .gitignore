@@ -1,0 +1,14 @@
+backend/.venv/
+.venv/
+backend/ryze_bi.db
+*.db
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+frontend/node_modules/
+frontend/.next/
+.kilo/
+__pycache__/
+*.py[cod]
