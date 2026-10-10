@@ -51,6 +51,10 @@ _CARD_NUMBER_COLUMN = re.compile(
     r"(?<![a-z0-9])(?:card_number|card_no|card_pan|pan|primary_account_number)(?![a-z0-9])",
     re.IGNORECASE,
 )
+_CREDENTIAL_COLUMN = re.compile(
+    r"(?<![a-z0-9])(?:password|passwd|pwd|secret|access_token|api_key|credential|token_hash)(?![a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _mask_card_number(value: Any) -> str:
@@ -141,6 +145,15 @@ def has_restricted_columns(rows: list[dict[str, Any]]) -> bool:
         _RESTRICTED_COLUMN.search(_normalize_key(key))
         for row in rows
         for key in row
+    )
+
+
+def is_sensitive_column(column_name: str) -> bool:
+    normalized = _normalize_key(column_name)
+    return bool(
+        _CVV_COLUMN.search(normalized)
+        or _RESTRICTED_COLUMN.search(normalized)
+        or _CREDENTIAL_COLUMN.search(normalized)
     )
 
 

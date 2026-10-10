@@ -1,4 +1,5 @@
 from typing import Any, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -7,6 +8,13 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     domain: Optional[str] = None
+
+
+class SignupRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=40, pattern=r"^[a-zA-Z0-9_.-]+$")
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=128)
+    domain: str = Field(pattern=r"^(banking|finance|insurance|retail)$")
 
 
 class TokenResponse(BaseModel):
@@ -19,8 +27,12 @@ class TokenResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(min_length=3)
-    llm_provider: Optional[str] = None
+    question: str = Field(min_length=3, max_length=2000)
+    conversation_id: UUID | None = None
+    llm_provider: Optional[str] = Field(
+        default=None,
+        pattern="^(auto|openai|grok|xai|anthropic|ollama)$",
+    )
 
 
 class PredictionPayload(BaseModel):
@@ -52,3 +64,4 @@ class QueryResponse(BaseModel):
     guardrails: Optional[dict[str, Any]] = None
     hitl: Optional[dict[str, Any]] = None
     model_gov: Optional[dict[str, Any]] = None
+    conversation_id: UUID | None = None

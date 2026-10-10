@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -13,6 +15,7 @@ from .models import AppUser
 from .security import hash_password, verify_password
 
 bearer = HTTPBearer(auto_error=False)
+_USERNAME_PATTERN = re.compile(r"^[a-z0-9_.-]{3,40}$")
 
 
 @dataclass
@@ -32,6 +35,7 @@ def create_access_token(username: str, domain: str, role: str) -> str:
 
 
 def authenticate(db: Session, username: str, password: str, domain: str | None) -> tuple[str, AuthUser]:
+    username = username.strip().lower()
     user = db.query(AppUser).filter(AppUser.username == username).one_or_none()
     if user is None or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
@@ -48,6 +52,44 @@ def authenticate(db: Session, username: str, password: str, domain: str | None) 
     role = "admin" if user.domain == "all" else "analyst"
     auth = AuthUser(username=user.username, domain=requested, role=role)
     return create_access_token(user.username, requested, role), auth
+
+
+def register_user(
+    db: Session,
+    username: str,
+    password: str,
+    domain: str,
+    display_name: str,
+) -> tuple[str, AuthUser]:
+    username = username.strip().lower()
+    display_name = display_name.strip()
+    if not _USERNAME_PATTERN.fullmatch(username):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Username must be 3-40 characters and use only letters, numbers, dots, underscores, or hyphens.",
+        )
+    if domain not in DOMAINS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Choose a valid business domain.")
+    if not display_name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Display name cannot be blank.")
+    if db.query(AppUser).filter(AppUser.username == username).one_or_none() is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That username is already registered.")
+
+    account = AppUser(
+        username=username,
+        password_hash=hash_password(password),
+        domain=domain,
+        display_name=display_name,
+    )
+    db.add(account)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That username is already registered.") from exc
+
+    auth = AuthUser(username=username, domain=domain, role="analyst")
+    return create_access_token(username, domain, auth.role), auth
 
 
 def get_current_user(

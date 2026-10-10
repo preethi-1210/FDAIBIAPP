@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { LoaderCircle } from "lucide-react";
 import { Shell } from "@/components/Shell";
+import { BusinessContext } from "@/components/ContextArchitecture";
 import { BarList, LineChart, PALETTES, PalettePicker, PieChart } from "@/components/Charts";
 import { RiskMatrixHeatMap } from "@/components/RiskMatrixHeatMap";
 import { api } from "@/lib/api";
@@ -20,6 +22,7 @@ type Dash = {
   events: number;
   customers: number;
   churn_rate: number;
+  churn_label?: string;
   claims: number;
   loss_ratio: number;
   loss_ratio_label: string;
@@ -40,7 +43,10 @@ type Dash = {
 
 export default function DashboardPage() {
   const [data, setData] = useState<Dash | null>(null);
+  const [businessContext, setBusinessContext] = useState<BusinessContext | null>(null);
+  const [contextError, setContextError] = useState("");
   const [error, setError] = useState("");
+  const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [palette, setPalette] = useState("slate");
   const [tab, setTab] = useState<"overview" | "heatmap" | "loss" | "audit">("overview");
   const colors = PALETTES[palette];
@@ -49,8 +55,25 @@ export default function DashboardPage() {
   async function load() {
     try {
       setData(await api<Dash>("/dashboard"));
+      setError("");
+      if (!refreshTimer.current) {
+        refreshTimer.current = setInterval(() => void load(), 30000);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Dashboard failed");
+      if (refreshTimer.current) {
+        clearInterval(refreshTimer.current);
+        refreshTimer.current = null;
+      }
+    }
+  }
+
+  async function loadBusinessContext() {
+    try {
+      setBusinessContext(await api<BusinessContext>("/context"));
+      setContextError("");
+    } catch (err) {
+      setContextError(err instanceof Error ? err.message : "Could not load your business context.");
     }
   }
 
@@ -59,27 +82,72 @@ export default function DashboardPage() {
       window.location.href = "/login";
       return;
     }
-    load();
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
+    void load();
+    void loadBusinessContext();
+    return () => {
+      if (refreshTimer.current) clearInterval(refreshTimer.current);
+    };
   }, []);
 
   return (
     <Shell>
-      <div className="dashboard-page">
+      <div className="dashboard-page workspace-dark">
       <div className="dashboard-heading">
-        <h1 style={{ marginTop: 0, marginBottom: 0 }}>{data?.domain_label || "Analyze"}</h1>
+        <h1 style={{ marginTop: 0, marginBottom: 0 }}>{data?.domain_label || "Dashboard"}</h1>
         <PalettePicker value={palette} onChange={setPalette} />
       </div>
-      <p className="dashboard-subtitle">Live refresh · charts update every 8 seconds · {data?.updated_at}</p>
-      {error ? <p style={{ color: "#b42318" }}>{error}</p> : null}
+      <p className="dashboard-subtitle">
+        {data
+          ? `Live refresh · charts update every 30 seconds · ${data.updated_at}`
+          : "Waiting for the configured live warehouse."}
+      </p>
+      {businessContext ? (
+        <section className="mb-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-indigo-100 bg-gradient-to-r from-white to-indigo-50/60 p-4 shadow-sm">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-600">Your authorized business context</p>
+            <p className="mt-1 text-sm font-semibold text-slate-800">
+              {businessContext.user.username} · {businessContext.user.role} · {businessContext.user.domain_label}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {businessContext.source.warehouse}
+              {businessContext.source.catalog ? ` · ${businessContext.source.catalog}` : ""}
+              {businessContext.source.schema ? ` · ${businessContext.source.schema}` : ""}
+              {" · "}
+              {businessContext.source.metadata_available ? "Source metadata available" : "Source metadata unavailable"}
+            </p>
+          </div>
+          <Link href="/context" className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50">
+            Explore context <span aria-hidden="true">→</span>
+          </Link>
+        </section>
+      ) : contextError ? (
+        <div role="alert" className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          <span>Business context is unavailable: {contextError}</span>
+          <button type="button" onClick={() => void loadBusinessContext()} className="font-semibold underline">Retry</button>
+        </div>
+      ) : null}
+      {error ? (
+        <div
+          role="alert"
+          className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-300/25 bg-rose-300/10 p-4 text-sm text-rose-100"
+        >
+          <p>{error}</p>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="rounded-lg border border-rose-200/30 px-3 py-2 font-medium hover:bg-rose-200/10"
+          >
+            Retry connection
+          </button>
+        </div>
+      ) : null}
       {data ? (
         <>
           <div className="dashboard-kpis">
             <Kpi label={data.metric_name} value={data.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })} color={colors[0]} />
             <Kpi label="Events" value={String(data.events)} color={colors[1]} />
             <Kpi label="Customers" value={String(data.customers)} color={colors[2]} />
-            <Kpi label="Churn" value={`${(data.churn_rate * 100).toFixed(1)}%`} color={colors[3]} />
+            <Kpi label={data.churn_label || "Churn"} value={`${(data.churn_rate * 100).toFixed(1)}%`} color={colors[3]} />
             <Kpi label={data.loss_ratio_label} value={`${(data.loss_ratio * 100).toFixed(1)}%`} color={colors[4] || colors[0]} />
             <Kpi label="Guardrail pass" value={`${(data.guardrail_pass_rate * 100).toFixed(0)}%`} color={colors[1]} />
           </div>

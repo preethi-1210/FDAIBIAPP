@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from random import Random
+import re
 from typing import Any
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -19,21 +21,27 @@ from ..sensitive_data import (
     requested_sensitive_type,
     sanitize_sensitive_rows,
 )
-from ..warehouse import execute_readonly, execute_readonly_batch
+from ..warehouse import (
+    databricks_domain_catalog,
+    execute_databricks_domain_batch,
+    execute_readonly,
+    execute_readonly_batch,
+)
 from .context_graph import ContextGraphService
 from .feature_builder import build_features
 from .guardrail import GuardrailError
-from .planner import plan_query
+from .assistant_graph import BusinessAssistantGraph
+from .schema_rag import SchemaRagError
 from .sql_generator import generate_sql
 from .synthesis import synthesize
 from .tabpfn_service import TabPFNService
 
 RISK_RATIO_DEFINITIONS = {
     "banking": {
-        "label": "Delinquency ratio",
-        "description": "Delinquent banking exposure divided by non-cancelled banking volume.",
-        "numerator_label": "Delinquent exposure",
-        "denominator_label": "Active banking volume",
+        "label": "Dormant account ratio",
+        "description": "Dormant account balances divided by open banking account balances.",
+        "numerator_label": "Dormant account balances",
+        "denominator_label": "Open account balances",
     },
     "finance": {
         "label": "Cancelled trade ratio (demo proxy)",
@@ -54,6 +62,51 @@ RISK_RATIO_DEFINITIONS = {
         "denominator_label": "Gross sales",
     },
 }
+
+_SQL_SOURCE_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN)\s+((?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)"
+    r"(?:\s*\.\s*(?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)){0,2})",
+    re.IGNORECASE,
+)
+_CTE_PATTERN = re.compile(
+    r"(?:\bWITH\b|,)\s*([A-Za-z_][A-Za-z0-9_$]*)\s+AS\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _validate_query_sources(sql: str, schema_ctx: dict[str, Any], domain: str) -> None:
+    available_tables = {str(table).lower() for table in schema_ctx.get("tables", {})}
+    cte_names = {name.lower() for name in _CTE_PATTERN.findall(sql)}
+    for match in _SQL_SOURCE_PATTERN.finditer(sql):
+        parts = [
+            part.strip().strip("`\"").lower()
+            for part in re.split(r"\s*\.\s*", match.group(1))
+        ]
+        table = parts[-1]
+        if table in cte_names:
+            continue
+        if table not in available_tables:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Generated SQL references '{table}', which is not present in the "
+                    f"authorized {domain} source schema. No query was run."
+                ),
+            )
+        if settings.warehouse == "databricks" and len(parts) > 1:
+            expected_schema = settings.databricks_domain_schema.lower()
+            expected_catalog = databricks_domain_catalog(domain).lower()
+            if parts[-2] != expected_schema or (
+                len(parts) == 3 and parts[0] != expected_catalog
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Generated SQL references a catalog/schema outside the "
+                        f"authorized {domain} source ({expected_catalog}.{expected_schema}). "
+                        "No query was run."
+                    ),
+                )
 
 
 def _risk_ratio_query(domain: str, domain_sql: str, parameterized: bool = False) -> str:
@@ -113,9 +166,206 @@ def _build_risk_ratio_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return risk_rows
 
 
+def _databricks_dashboard_queries(domain: str) -> list[str]:
+    if domain == "banking":
+        month = "date_format(transaction_date, 'yyyy-MM')"
+        return [
+            """
+                SELECT COALESCE(SUM(balance), 0) AS volume,
+                       COUNT_IF(lower(account_status) != 'closed') AS events
+                FROM accounts
+            """,
+            """
+                SELECT COUNT(DISTINCT customer_id) AS customers,
+                       COALESCE(
+                           SUM(CASE WHEN lower(account_status) = 'closed' THEN 1 ELSE 0 END)
+                           / NULLIF(COUNT(*), 0),
+                           0
+                       ) AS churn_rate
+                FROM accounts
+            """,
+            """
+                SELECT b.state AS label, COUNT(a.account_id) AS events,
+                       COALESCE(SUM(a.balance), 0) AS value
+                FROM accounts a
+                JOIN branches b ON b.branch_id = a.branch_id
+                WHERE lower(a.account_status) != 'closed'
+                GROUP BY b.state ORDER BY value DESC
+            """,
+            """
+                SELECT account_type AS label, COALESCE(SUM(balance), 0) AS value
+                FROM accounts WHERE lower(account_status) != 'closed'
+                GROUP BY account_type ORDER BY value DESC
+            """,
+            f"""
+                SELECT {month} AS label, COALESCE(SUM(amount), 0) AS value,
+                       COUNT(*) AS events
+                FROM transactions GROUP BY {month} ORDER BY label
+            """,
+            """
+                SELECT transaction_type AS label, amount AS value, transaction_date AS created_at
+                FROM transactions ORDER BY transaction_date DESC LIMIT 12
+            """,
+            """
+                SELECT b.state AS region, t.merchant_category AS category,
+                       COALESCE(SUM(t.amount), 0) AS value
+                FROM transactions t
+                JOIN accounts a ON a.account_id = t.account_id
+                JOIN branches b ON b.branch_id = a.branch_id
+                GROUP BY b.state, t.merchant_category
+            """,
+            "SELECT CAST(0 AS DOUBLE) AS claims",
+            """
+                SELECT b.state AS region,
+                       COALESCE(SUM(CASE WHEN lower(a.account_status) = 'dormant'
+                                         THEN a.balance ELSE 0 END), 0) AS numerator,
+                       COALESCE(SUM(a.balance), 0) AS denominator
+                FROM accounts a
+                JOIN branches b ON b.branch_id = a.branch_id
+                GROUP BY b.state ORDER BY b.state
+            """,
+        ]
+
+    if domain == "insurance":
+        month = "date_format(policy_start_date, 'yyyy-MM')"
+        return [
+            """
+                SELECT COALESCE(SUM(premium_amount), 0) AS volume,
+                       COUNT_IF(lower(status) != 'cancelled') AS events
+                FROM policies
+            """,
+            """
+                SELECT COUNT(DISTINCT customer_id) AS customers,
+                       COALESCE(
+                           SUM(CASE WHEN lower(status) = 'cancelled' THEN 1 ELSE 0 END)
+                           / NULLIF(COUNT(*), 0),
+                           0
+                       ) AS churn_rate
+                FROM policies
+            """,
+            """
+                SELECT c.state AS label, COUNT(p.policy_id) AS events,
+                       COALESCE(SUM(p.premium_amount), 0) AS value
+                FROM policies p
+                JOIN customers_with_payment_test_data c ON c.customer_id = p.customer_id
+                WHERE lower(p.status) != 'cancelled'
+                GROUP BY c.state ORDER BY value DESC
+            """,
+            """
+                SELECT pr.product_type AS label, COALESCE(SUM(p.premium_amount), 0) AS value
+                FROM policies p JOIN products pr ON pr.product_id = p.product_id
+                WHERE lower(p.status) != 'cancelled'
+                GROUP BY pr.product_type ORDER BY value DESC
+            """,
+            f"""
+                SELECT {month} AS label, COALESCE(SUM(premium_amount), 0) AS value,
+                       COUNT(*) AS events
+                FROM policies WHERE lower(status) != 'cancelled'
+                GROUP BY {month} ORDER BY label
+            """,
+            """
+                SELECT payment_status AS label, amount AS value, payment_date AS created_at
+                FROM payments ORDER BY payment_date DESC LIMIT 12
+            """,
+            """
+                SELECT c.state AS region, pr.product_type AS category,
+                       COALESCE(SUM(p.premium_amount), 0) AS value
+                FROM policies p
+                JOIN customers_with_payment_test_data c ON c.customer_id = p.customer_id
+                JOIN products pr ON pr.product_id = p.product_id
+                WHERE lower(p.status) != 'cancelled'
+                GROUP BY c.state, pr.product_type
+            """,
+            "SELECT COALESCE(SUM(claim_amount), 0) AS claims FROM claims",
+            """
+                SELECT premiums.region, COALESCE(losses.numerator, 0) AS numerator,
+                       premiums.denominator
+                FROM (
+                    SELECT c.state AS region, SUM(p.premium_amount) AS denominator
+                    FROM policies p
+                    JOIN customers_with_payment_test_data c ON c.customer_id = p.customer_id
+                    WHERE lower(p.status) != 'cancelled'
+                    GROUP BY c.state
+                ) premiums
+                LEFT JOIN (
+                    SELECT c.state AS region, SUM(cl.claim_amount) AS numerator
+                    FROM claims cl
+                    JOIN policies p ON p.policy_id = cl.policy_id
+                    JOIN customers_with_payment_test_data c ON c.customer_id = p.customer_id
+                    GROUP BY c.state
+                ) losses ON losses.region = premiums.region
+                ORDER BY premiums.region
+            """,
+        ]
+
+    if domain == "retail":
+        month = "date_format(order_date, 'yyyy-MM')"
+        return [
+            """
+                SELECT COALESCE(SUM(order_amount), 0) AS volume,
+                       COUNT_IF(lower(order_status) != 'cancelled') AS events
+                FROM retail_orders
+            """,
+            """
+                SELECT COUNT(DISTINCT customer_id) AS customers,
+                       COALESCE(
+                           SUM(CASE WHEN lower(order_status) = 'cancelled' THEN 1 ELSE 0 END)
+                           / NULLIF(COUNT(*), 0),
+                           0
+                       ) AS churn_rate
+                FROM retail_orders
+            """,
+            """
+                SELECT region AS label, COUNT(*) AS events,
+                       COALESCE(SUM(order_amount), 0) AS value
+                FROM retail_orders WHERE lower(order_status) != 'cancelled'
+                GROUP BY region ORDER BY value DESC
+            """,
+            """
+                SELECT p.category AS label, COALESCE(SUM(o.order_amount), 0) AS value
+                FROM retail_orders o
+                JOIN retail_products p ON p.product_id = o.product_id
+                WHERE lower(o.order_status) != 'cancelled'
+                GROUP BY p.category ORDER BY value DESC
+            """,
+            f"""
+                SELECT {month} AS label, COALESCE(SUM(order_amount), 0) AS value,
+                       COUNT(*) AS events
+                FROM retail_orders WHERE lower(order_status) != 'cancelled'
+                GROUP BY {month} ORDER BY label
+            """,
+            """
+                SELECT order_status AS label, order_amount AS value, order_date AS created_at
+                FROM retail_orders ORDER BY order_date DESC LIMIT 12
+            """,
+            """
+                SELECT o.region, p.category,
+                       COALESCE(SUM(o.order_amount), 0) AS value
+                FROM retail_orders o
+                JOIN retail_products p ON p.product_id = o.product_id
+                WHERE lower(o.order_status) != 'cancelled'
+                GROUP BY o.region, p.category
+            """,
+            "SELECT CAST(0 AS DOUBLE) AS claims",
+            """
+                SELECT region,
+                       COALESCE(SUM(CASE WHEN lower(order_status) = 'cancelled'
+                                         THEN order_amount ELSE 0 END), 0) AS numerator,
+                       COALESCE(SUM(order_amount), 0) AS denominator
+                FROM retail_orders GROUP BY region ORDER BY region
+            """,
+        ]
+
+    raise GuardrailError(
+        f"No Databricks business catalog is configured for the {domain} dashboard. "
+        "Configure its authorized catalog and dashboard source mapping before using this domain."
+    )
+
+
 class Orchestrator:
     def __init__(self) -> None:
         self.graph = ContextGraphService()
+        self.assistant = BusinessAssistantGraph(self.graph)
         self.tabpfn = TabPFNService()
         self._ready = False
 
@@ -130,9 +380,22 @@ class Orchestrator:
         user: AuthUser,
         llm_override: str | None = None,
         persist_history: bool = True,
+        conversation_context: list[dict[str, str]] | None = None,
+        conversation_id: UUID | None = None,
     ) -> QueryResponse:
         if not self._ready:
-            self.warmup(db)
+            try:
+                self.warmup(db)
+            except GuardrailError as exc:
+                if settings.warehouse not in {"databricks", "snowflake"}:
+                    raise
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"The configured {settings.warehouse} warehouse is unavailable. "
+                        f"Check the catalog/schema settings and warehouse permissions: {exc}"
+                    ),
+                ) from exc
 
         require_sensitive_request_access(question, user.role)
         admin_sensitive_request = (
@@ -146,12 +409,21 @@ class Orchestrator:
                     status_code=503,
                     detail=f"Could not inspect the connected schema for approved sensitive fields: {exc}",
                 ) from exc
-        plan = plan_query(question, llm_override)
-        schema_ctx = self.graph.resolve(
-            question,
-            user.domain,
-            include_all_tables=admin_sensitive_request,
-        )
+        try:
+            assistant_state = self.assistant.invoke(
+                question,
+                user.domain,
+                llm_override,
+                include_all_tables=admin_sensitive_request,
+                conversation_context=conversation_context,
+            )
+        except SchemaRagError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Business schema retrieval is unavailable: {exc}",
+            ) from exc
+        plan = assistant_state["plan"]
+        schema_ctx = assistant_state["schema_context"]
         try:
             sql = generate_sql(
                 question,
@@ -160,15 +432,17 @@ class Orchestrator:
                 user.domain,
                 llm_override,
                 role=user.role,
+                conversation_context=conversation_context,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _validate_query_sources(sql, schema_ctx, user.domain)
         require_sql_sensitive_access(sql, user.role)
         audit_id = f"AU-{int(datetime.utcnow().timestamp()) % 100000:04d}"
         schema_used = list(schema_ctx.get("tables", {}).keys())
 
         try:
-            table = sanitize_sensitive_rows(execute_readonly(sql), user.role)
+            table = sanitize_sensitive_rows(execute_readonly(sql, user.domain), user.role)
             guardrail_ok = True
             error = None
         except GuardrailError as exc:
@@ -188,30 +462,22 @@ class Orchestrator:
         answer = (
             error
             if not guardrail_ok
-            else synthesize(question, table, sql, prediction, uncertainty, user.domain, llm_override)
+            else synthesize(
+                question,
+                table,
+                sql,
+                prediction,
+                uncertainty,
+                user.domain,
+                llm_override,
+                conversation_context,
+            )
         )
         if error and guardrail_ok and prediction is None and plan.get("is_prediction"):
             answer = error
 
-        if settings.warehouse == "databricks":
-            domain_sql = "'" + user.domain + "'"
-            remote_counts = execute_readonly_batch(
-                [
-                    f"""
-                        SELECT
-                            (SELECT COUNT(*) FROM orders WHERE domain = {domain_sql}) AS orders,
-                            (SELECT COUNT(*) FROM claims WHERE domain = {domain_sql}) AS claims,
-                            (SELECT COUNT(*) FROM customers WHERE domain = {domain_sql}) AS customers
-                    """
-                ]
-            )[0]
-            count_row = remote_counts[0] if remote_counts else {}
-            orders_count = int(count_row.get("orders") or 0)
-            counts = {
-                "bronze": orders_count + int(count_row.get("claims") or 0),
-                "silver": int(count_row.get("customers") or 0),
-                "gold": orders_count,
-            }
+        if settings.warehouse in {"databricks", "snowflake"}:
+            counts = {}
         else:
             orders_count = db.query(Order).filter(Order.domain == user.domain).count()
             counts = {
@@ -261,6 +527,7 @@ class Orchestrator:
             guardrails=guardrail_report(sql, guardrail_ok, error),
             hitl=hitl,
             model_gov=model_gov(prediction, resolve_provider(llm_override)),
+            conversation_id=conversation_id,
         )
         if persist_history:
             history = QueryHistory(
@@ -280,8 +547,8 @@ class Orchestrator:
         return response
 
     def dashboard_metrics(self, db: Session, domain: str, simulate: bool = False) -> dict[str, Any]:
-        if settings.warehouse == "databricks":
-            return self._dashboard_metrics_databricks(db, domain)
+        if settings.warehouse in {"databricks", "snowflake"}:
+            return self._dashboard_metrics_remote_warehouse(db, domain)
         if simulate and settings.live_simulate:
             _simulate_tick(db, domain)
 
@@ -441,72 +708,95 @@ class Orchestrator:
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
 
-    def _dashboard_metrics_databricks(self, db: Session, domain: str) -> dict[str, Any]:
+    def _dashboard_metrics_remote_warehouse(self, db: Session, domain: str) -> dict[str, Any]:
         if domain not in DOMAIN_LABELS:
             raise ValueError(f"Unsupported business domain '{domain}'")
-        d = "'" + domain + "'"
-        queries = [
-            f"""
-                SELECT COALESCE(SUM(total_amount), 0) AS volume, COUNT(*) AS events
-                FROM orders
-                WHERE domain = {d} AND status != 'cancelled'
-            """,
-            f"""
-                SELECT COUNT(*) AS customers, COALESCE(AVG(churned), 0) AS churn_rate
-                FROM customers WHERE domain = {d}
-            """,
-            f"""
-                SELECT c.region AS label, COUNT(o.id) AS events,
-                       COALESCE(SUM(o.total_amount), 0) AS value
-                FROM customers c
-                LEFT JOIN orders o ON o.customer_id = c.id AND o.domain = {d}
-                    AND o.status != 'cancelled'
-                WHERE c.domain = {d}
-                GROUP BY c.region ORDER BY value DESC
-            """,
-            f"""
-                SELECT p.category AS label, COALESCE(SUM(oi.amount), 0) AS value
-                FROM products p
-                LEFT JOIN order_items oi ON oi.product_id = p.id AND oi.domain = {d}
-                WHERE p.domain = {d}
-                GROUP BY p.category ORDER BY value DESC
-            """,
-            f"""
-                SELECT date_format(order_date, 'yyyy-MM') AS label,
-                       COALESCE(SUM(total_amount), 0) AS value, COUNT(*) AS events
-                FROM orders
-                WHERE domain = {d} AND status != 'cancelled'
-                GROUP BY date_format(order_date, 'yyyy-MM') ORDER BY label
-            """,
-            f"""
-                SELECT event_type AS label, amount AS value, created_at
-                FROM live_events WHERE domain = {d} ORDER BY id DESC LIMIT 12
-            """,
-            f"""
-                SELECT c.region AS region, p.category AS category,
-                       COALESCE(SUM(oi.amount), 0) AS value
-                FROM customers c
-                JOIN orders o ON o.customer_id = c.id AND o.domain = {d}
-                    AND o.status != 'cancelled'
-                JOIN order_items oi ON oi.order_id = o.id AND oi.domain = {d}
-                JOIN products p ON p.id = oi.product_id
-                WHERE c.domain = {d}
-                GROUP BY c.region, p.category
-            """,
-            f"SELECT COALESCE(SUM(amount), 0) AS claims FROM claims WHERE domain = {d}",
-            _risk_ratio_query(domain, d),
-        ]
-        (
-            overview,
-            customer_stats,
-            by_region,
-            by_category,
-            by_month,
-            live,
-            heatmap,
-            claims,
-            loss_by_region_rows,
-        ) = execute_readonly_batch(queries)
+        if settings.warehouse == "databricks":
+            (
+                overview,
+                customer_stats,
+                by_region,
+                by_category,
+                by_month,
+                live,
+                heatmap,
+                claims,
+                loss_by_region_rows,
+            ) = execute_databricks_domain_batch(
+                domain,
+                _databricks_dashboard_queries(domain),
+            )
+            churn_label = {
+                "banking": "Closed account rate",
+                "insurance": "Cancelled policy rate",
+                "retail": "Cancelled order rate",
+            }.get(domain, "Churn")
+        else:
+            d = "'" + domain + "'"
+            month_expression = "TO_CHAR(order_date, 'YYYY-MM')"
+            queries = [
+                f"""
+                    SELECT COALESCE(SUM(total_amount), 0) AS volume, COUNT(*) AS events
+                    FROM orders
+                    WHERE domain = {d} AND status != 'cancelled'
+                """,
+                f"""
+                    SELECT COUNT(*) AS customers, COALESCE(AVG(churned), 0) AS churn_rate
+                    FROM customers WHERE domain = {d}
+                """,
+                f"""
+                    SELECT c.region AS label, COUNT(o.id) AS events,
+                           COALESCE(SUM(o.total_amount), 0) AS value
+                    FROM customers c
+                    LEFT JOIN orders o ON o.customer_id = c.id AND o.domain = {d}
+                        AND o.status != 'cancelled'
+                    WHERE c.domain = {d}
+                    GROUP BY c.region ORDER BY value DESC
+                """,
+                f"""
+                    SELECT p.category AS label, COALESCE(SUM(oi.amount), 0) AS value
+                    FROM products p
+                    LEFT JOIN order_items oi ON oi.product_id = p.id AND oi.domain = {d}
+                    WHERE p.domain = {d}
+                    GROUP BY p.category ORDER BY value DESC
+                """,
+                f"""
+                    SELECT {month_expression} AS label,
+                           COALESCE(SUM(total_amount), 0) AS value, COUNT(*) AS events
+                    FROM orders
+                    WHERE domain = {d} AND status != 'cancelled'
+                    GROUP BY {month_expression} ORDER BY label
+                """,
+                f"""
+                    SELECT event_type AS label, amount AS value, created_at
+                    FROM live_events WHERE domain = {d} ORDER BY id DESC LIMIT 12
+                """,
+                f"""
+                    SELECT c.region AS region, p.category AS category,
+                           COALESCE(SUM(oi.amount), 0) AS value
+                    FROM customers c
+                    JOIN orders o ON o.customer_id = c.id AND o.domain = {d}
+                        AND o.status != 'cancelled'
+                    JOIN order_items oi ON oi.order_id = o.id AND oi.domain = {d}
+                    JOIN products p ON p.id = oi.product_id
+                    WHERE c.domain = {d}
+                    GROUP BY c.region, p.category
+                """,
+                f"SELECT COALESCE(SUM(amount), 0) AS claims FROM claims WHERE domain = {d}",
+                _risk_ratio_query(domain, d),
+            ]
+            (
+                overview,
+                customer_stats,
+                by_region,
+                by_category,
+                by_month,
+                live,
+                heatmap,
+                claims,
+                loss_by_region_rows,
+            ) = execute_readonly_batch(queries)
+            churn_label = "Churn"
         audits = (
             db.query(QueryHistory)
             .filter(QueryHistory.domain == domain)
@@ -550,6 +840,7 @@ class Orchestrator:
             "events": int(overview[0]["events"] or 0) if overview else 0,
             "customers": int(customers_row.get("customers") or 0),
             "churn_rate": float(customers_row.get("churn_rate") or 0),
+            "churn_label": churn_label,
             "claims": claims_total if domain == "insurance" else 0.0,
             "loss_ratio": risk_numerator / risk_denominator if risk_denominator else 0.0,
             "loss_ratio_label": risk_definition["label"],

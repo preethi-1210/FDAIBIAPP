@@ -11,6 +11,13 @@ function formatAmount(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
 }
 
+function formatCellAmount(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumSignificantDigits: 3,
+  }).format(value);
+}
+
 function quantile(sortedValues: number[], fraction: number): number {
   const index = (sortedValues.length - 1) * fraction;
   const lower = Math.floor(index);
@@ -63,7 +70,10 @@ export function RiskMatrixHeatMap({
         <div className="risk-matrix__layout">
           <div className="risk-matrix__board">
             <div className="risk-matrix__table-scroll" role="region" aria-label={`${metricName} by region and category`} tabIndex={0}>
-              <table className="risk-matrix__table">
+              <table
+                className="risk-matrix__table"
+                style={{ minWidth: `${Math.max(560, 128 + regions.length * 52)}px` }}
+              >
                 <thead>
                   <tr>
                     <th scope="col" className="risk-matrix__corner">Category ↓<br />Region →</th>
@@ -86,7 +96,7 @@ export function RiskMatrixHeatMap({
                             aria-label={`${category} in ${region}: ${formatAmount(value)} ${metricName}`}
                             title={`${category} · ${region}: ${formatAmount(value)} ${metricName}`}
                           >
-                            {formatAmount(value)}
+                            {formatCellAmount(value)}
                           </td>
                         );
                       })}

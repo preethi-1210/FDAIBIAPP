@@ -1,19 +1,37 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .config import settings
+from .warehouse import databricks_domain_catalog
 
+
+# def catalog_name(domain: str) -> str:
+#     if settings.warehouse == "databricks" and settings.databricks_catalog:
+#         return settings.databricks_catalog
+#     if settings.warehouse == "snowflake" and settings.snowflake_database:
+#         return settings.snowflake_database
+#     return f"ryze_{domain}"
 
 def catalog_name(domain: str) -> str:
-    if settings.warehouse == "databricks" and settings.databricks_catalog:
-        return settings.databricks_catalog
-    return f"ryze_{domain}"
+    catalog_names = {
+        "banking": "banking",
+        "insurance": "insurance",
+        "retail": "retail",
+    }
+
+    if domain not in catalog_names:
+        raise ValueError(f"Unsupported business domain: {domain}")
+
+    return catalog_names[domain]
 
 
 def gold_schema() -> str:
     if settings.warehouse == "databricks":
         return settings.databricks_schema or "curated_gold"
+    if settings.warehouse == "snowflake":
+        return settings.snowflake_schema or "PUBLIC"
     return "curated_gold"
 
 
@@ -29,10 +47,11 @@ DOMAIN_VIEWS: dict[str, list[dict[str, Any]]] = {
         {"id": "vw_broker_loss_ratio", "label": "Broker loss ratio", "maps": ["claims", "orders"], "topic": "loss"},
     ],
     "banking": [
-        {"id": "vw_deposits_enriched", "label": "Deposits · PII masked", "maps": ["orders", "customers"], "topic": "deposits"},
-        {"id": "vw_transactions_enriched", "label": "Transactions · ACL", "maps": ["orders", "order_items"], "topic": "txn"},
+        {"id": "vw_deposits_enriched", "label": "Deposits · PII masked", "maps": ["accounts", "customers"], "topic": "deposits"},
+        {"id": "vw_transactions_enriched", "label": "Transactions · ACL", "maps": ["transactions", "accounts"], "topic": "txn"},
+        {"id": "vw_loans_enriched", "label": "Loans · ACL", "maps": ["loans", "customers"], "topic": "loan"},
         {"id": "vw_product_balances", "label": "Product balances", "maps": ["products", "orders"], "topic": "balance"},
-        {"id": "vw_npl_by_segment", "label": "NPL by segment", "maps": ["orders", "customers"], "topic": "risk"},
+        {"id": "vw_npl_by_segment", "label": "NPL by segment", "maps": ["loans", "customers"], "topic": "risk"},
         {"id": "vw_churn_risk", "label": "Churn risk", "maps": ["customers", "orders"], "topic": "churn"},
     ],
     "finance": [
@@ -59,20 +78,21 @@ PLATFORM_VIEWS = [
 def extract_tables(sql: str | None) -> list[str]:
     if not sql:
         return []
-    found = []
-    lowered = sql.lower().replace("\n", " ")
-    for name in (
-        "customers",
-        "orders",
-        "order_items",
-        "products",
-        "claims",
-        "glossary",
-        "live_events",
-        "query_history",
-    ):
-        if name in lowered:
-            found.append(name)
+    source_pattern = re.compile(
+        r"\b(?:FROM|JOIN)\s+((?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)"
+        r"(?:\s*\.\s*(?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)){0,2})",
+        re.IGNORECASE,
+    )
+    cte_pattern = re.compile(
+        r"(?:\bWITH\b|,)\s*([A-Za-z_][A-Za-z0-9_$]*)\s+AS\s*\(",
+        re.IGNORECASE,
+    )
+    cte_names = {name.lower() for name in cte_pattern.findall(sql)}
+    found: list[str] = []
+    for match in source_pattern.finditer(sql):
+        table = re.split(r"\s*\.\s*", match.group(1))[-1].strip("`\"")
+        if table.lower() not in cte_names and table not in found:
+            found.append(table)
     return found
 
 
@@ -125,8 +145,54 @@ def build_lineage(
     guardrail_ok: bool,
     local_counts: dict[str, int],
 ) -> dict[str, Any]:
-    cat = catalog_name(domain)
+    cat = (
+        databricks_domain_catalog(domain)
+        if settings.warehouse == "databricks"
+        else catalog_name(domain)
+    )
     tables = extract_tables(sql) or schema_used
+    if settings.warehouse == "databricks":
+        schema = settings.databricks_domain_schema
+        source_fqns = [f"{cat}.{schema}.{table}" for table in tables]
+        columns = list(table[0].keys()) if table else []
+        return {
+            "domain": domain,
+            "catalog": cat,
+            "engine": "Ryze NL→SQL (Genie off)",
+            "flow": [
+                f"{cat}.{schema}.{', '.join(tables)}",
+                "Ryze NL→SQL",
+                "Guardrails + domain-scoped read-only execution",
+                "fdryze_audit_log",
+            ],
+            "medallion": [
+                {
+                    "layer": "Queried Databricks source",
+                    "fqn": ", ".join(source_fqns),
+                    "blurb": "Live source tables queried directly; unqueried medallion layers are not inferred.",
+                    "stats": f"{len(table)} result rows",
+                }
+            ],
+            "views": [],
+            "trace": [
+                {"step": 1, "title": "Question", "detail": question, "by": username},
+                {"step": 2, "title": "Ryze · NL→SQL", "detail": (sql or "")[:280]},
+                {
+                    "step": 3,
+                    "title": "Live source tables",
+                    "detail": ", ".join(source_fqns) or "No source table identified",
+                    "columns": columns,
+                    "acl": True,
+                },
+                {"step": 4, "title": "Result", "detail": f"{len(table)} rows"},
+                {"step": 5, "title": "Audit log", "detail": audit_id, "status": "Logged"},
+            ],
+            "guardrail_ok": guardrail_ok,
+            "note": (
+                f"Read-only query executed against {cat}.{schema}; "
+                "Bronze/Gold lineage and source row counts are not reported unless verified."
+            ),
+        }
     views = DOMAIN_VIEWS.get(domain, DOMAIN_VIEWS["retail"])
     accessed: set[str] = set()
     for view in views:

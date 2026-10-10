@@ -1,9 +1,13 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class AppUser(Base):
@@ -69,6 +73,55 @@ class OrderItem(Base):
     product: Mapped[Product] = relationship()
 
 
+class BankAccount(Base):
+    __tablename__ = "accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True, default="banking")
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    account_number: Mapped[str] = mapped_column(String(40), unique=True)
+    account_type: Mapped[str] = mapped_column(String(40))
+    balance: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    status: Mapped[str] = mapped_column(String(40))
+    opened_date: Mapped[date] = mapped_column(Date)
+
+    customer: Mapped[Customer] = relationship()
+
+
+class BankTransaction(Base):
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True, default="banking")
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    transaction_date: Mapped[date] = mapped_column(Date, index=True)
+    transaction_type: Mapped[str] = mapped_column(String(40))
+    amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    status: Mapped[str] = mapped_column(String(40))
+    channel: Mapped[str] = mapped_column(String(40))
+
+    account: Mapped[BankAccount] = relationship()
+
+
+class BankLoan(Base):
+    __tablename__ = "loans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True, default="banking")
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    loan_type: Mapped[str] = mapped_column(String(40))
+    principal_amount: Mapped[float] = mapped_column(Float)
+    outstanding_balance: Mapped[float] = mapped_column(Float)
+    interest_rate: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(40))
+    origination_date: Mapped[date] = mapped_column(Date)
+    maturity_date: Mapped[date] = mapped_column(Date)
+
+    customer: Mapped[Customer] = relationship()
+
+
 class Claim(Base):
     __tablename__ = "claims"
 
@@ -117,6 +170,30 @@ class QueryHistory(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     guardrail_ok: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(10))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
 
 
 class HitlReview(Base):

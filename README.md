@@ -2,7 +2,7 @@
 
 Multi-business chat BI: **Banking / Finance / Insurance / Retail**. Natural language → planner → context graph → SQL → guardrail → warehouse → self-hosted TabPFN prediction → synthesis.
 
-Databricks **Genie is not used**. The Databricks SQL Warehouse can be configured as the live source for chat queries, TabPFN input rows, and dashboard metrics.
+Databricks **Genie is not used**. A Databricks SQL Warehouse or Snowflake can be configured as the live source for chat queries, TabPFN input rows, and dashboard metrics.
 
 ## Demo logins
 
@@ -35,109 +35,99 @@ npm run dev -- --port 3001
 
 Open http://localhost:3001. API is http://127.0.0.1:8011. Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` only if the API is hosted somewhere other than `http://localhost:8011`.
 
+## Login and self-sign-up
+
+The landing page supports both sign-in and self-sign-up. Self-sign-up is open in this build (there is no email verification or invite gate). New accounts choose one business domain and are always assigned the analyst role; public sign-up cannot create administrators or grant access to other domains. Usernames are normalized to lowercase, and passwords must be 12-128 characters. Passwords are stored as salted PBKDF2 hashes, and successful registration returns a domain-scoped JWT and signs the user in.
+
+The application account, query history, and conversation memory are configured separately from the business-data warehouse through `DATABASE_URL`. Conversation turns are persisted and scoped to the authenticated user and domain; the assistant receives only the latest 12 turns as follow-up context. Do not expose open registration to the public internet until an approved access policy is in place. For production, use a protected persistent PostgreSQL database, set a unique `JWT_SECRET` of at least 32 characters, and set `DEMO_MODE=false`. The current browser stores the JWT in local storage; use an approved SSO and secure server-side session design before enterprise rollout.
+
+## Context Intelligence
+
+The landing-page **Watch Demo** link opens an interactive, domain-selectable architecture walkthrough. Its sample labels and concepts are illustrative only; they are not live metrics or a query trace. After sign-in, Dashboard shows the authenticated user, role, domain, and source metadata. **Context Intelligence** appears first in the workspace navigation and opens the read-only context explorer.
+
+The explorer calls the authenticated `GET /context` API. It uses the JWT identity and permitted domain, returns source table/column metadata with sensitive columns omitted, includes glossary definitions scoped to that domain, and reports only relationships supported by database foreign-key metadata. Administrators may select among the domains allowed to their role; analyst requests for another domain are rejected by the API. The API does not treat a client-selected domain as authorization.
+
+Organization scoping, editable/publishable context, approved metric and rule registries, lineage for individual query results, and context synchronization history are not configured in the current backend. The explorer reports these as unavailable or unconfigured rather than presenting sample values as live. `GET /context` is the read-only metadata contract; adding those capabilities requires backend persistence, authorization, and audit endpoints before enabling management controls.
+
 ## LLM (planner / SQL / narrative)
 
 Set one or more in `backend/.env`:
 
 - OpenAI: `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-4o-mini`
 - Grok: `XAI_API_KEY`, `XAI_MODEL=grok-2-latest`
-- Ollama: run `ollama serve` and `ollama pull llama3.2`, then choose Ollama in Ask
+- Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-haiku-4-5`)
+- Ollama: install/start Ollama, pull a model, then set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL` to the exact installed tag. The default is `qwen3:4b`.
 
-`LLM_PROVIDER=auto` uses OpenAI, then Grok. Heuristic SQL still works with no key.
+For example, in PowerShell:
+
+```powershell
+ollama pull qwen3:4b
+ollama pull deepseek-r1:8b
+```
+
+The app uses one Ollama model at a time; change `OLLAMA_MODEL` and restart the backend to switch. Other Ollama library options include `gemma3:4b` and `mistral:7b`; check their download size and your machine's memory before pulling. Ollama serves its OpenAI-compatible API at `http://127.0.0.1:11434/v1`. `LLM_PROVIDER=auto` prefers configured Anthropic, then OpenAI, then Grok, then local Ollama. Heuristic SQL still works if no LLM service is reachable. API keys belong only in the backend environment or a secrets manager.
+
+### Local schema RAG and MCP
+
+The assistant uses LangGraph to plan and retrieve context, LangChain with ChromaDB for a local persistent vector index, and Ollama `nomic-embed-text` for local embeddings. The index contains only database table/column descriptions and the business glossary; it does not index business rows or user conversations. Install the Python requirements, run `ollama pull nomic-embed-text`, then start the backend. Set `RAG_EMBEDDING_MODEL` or `CHROMA_DB_PATH` in `backend/.env` only if you need to change the defaults. Chroma's `.chroma/` data directory is local and ignored by git.
+
+An optional stdio MCP server exposes `list_business_tables` and `ask_business` tools. Start it from `backend/` with `python -m app.mcp_server` and set `MCP_ACCESS_TOKEN` in the server process environment to a short-lived JWT for a least-privileged user. Each tool revalidates that token against the application database; analytics still passes through domain scoping, sensitive-data checks, read-only SQL guardrails, audit history, and HITL handling. Do not commit or share the MCP token.
 
 ## Local demo data
 
-SQLite is seeded with ~80 demo customers per domain and thousands of generated events. The Analyze page can simulate live ticks when using the local warehouse. This is demo data, not production business data.
+SQLite is seeded with ~80 demo customers per domain and thousands of generated events. The Dashboard page can simulate live ticks when using the local warehouse. This is demo data, not production business data.
 
 Keep `WAREHOUSE=local`, `DEMO_MODE=true`, and `LIVE_SIMULATE=true` for the reproducible local demo. Demo accounts are listed above. The Connect screen labels this mode as sample data; it does not mix sample rows into a Databricks query. Use the **Connect → Run TabPFN diagnostic** button to run an actual local TabPFN model against generated test rows. The TabPFN model download may make the first test take several minutes.
 
-Postgres + PL/pgSQL:
+PostgreSQL + PL/pgSQL (local development):
 
 ```bash
 docker compose up -d
 ```
 
-`DATABASE_URL=postgresql://ryze:ryze@localhost:5432/ryze_bi`
+Then set the backend `.env` to `DATABASE_URL=postgresql://ryze:ryze@localhost:5432/ryze_bi` and restart the API. These are development-only credentials from the repository's Docker Compose file; replace them and use a managed secret for any shared or production database. On an empty database, startup creates the application tables and seeds synthetic demo data when `DEMO_MODE=true`. PostgreSQL stores app history/auth data and the local business sample tables; the separate `WAREHOUSE` setting can still select Databricks.
 
-Optional routines: `backend/sql/seed_plpgsql.sql` (`ryze_live_tick`).
+The Banking sample is generated data, not real account-holder data. Alongside shared `customers`, `products`, `orders`, `order_items`, and `glossary`, the app creates dedicated `accounts`, `transactions`, and `loans` tables and seeds them for existing demo Banking customers. The account identifiers use a `DEMO-BANK-` prefix and are synthetic; transaction and loan amounts are generated. Re-running startup does not duplicate this Banking sample. These tables are created and seeded only when `DEMO_MODE=true`.
+
+Optional PostgreSQL routine: startup creates `ryze_live_tick`; the SQL source is `backend/sql/seed_plpgsql.sql`.
 
 ## Databricks SQL Warehouse
 
 Use the following checklist to connect your workspace. Databricks credentials belong only in the backend environment; never put them in `frontend/.env*`, commit them, or paste them into chat.
 
-### 1. Prepare Databricks
+The backend accepts both `DATABRICKS_SERVER_HOSTNAME` / `DATABRICKS_TOKEN` / `DATABRICKS_WAREHOUSE_ID` and the aliases `DATABRICKS_HOST` / `DATABRICKS_PAT` / `WAREHOUSE_ID`. An HTTP path is still required; when omitted, it is derived from the warehouse ID. Genie is not used.
 
-1. In your Databricks workspace, create or choose a **SQL Warehouse**, start it, and record its **Server hostname** and **HTTP path** from the warehouse connection details.
-2. Choose a catalog and create a schema, for example `main.ryze_bi`.
-3. Create Delta tables in that schema with these column names and types. Keep the `domain` column on each business table so the app can scope results to Banking, Finance, Insurance, or Retail.
+## Snowflake
 
-```sql
-CREATE SCHEMA IF NOT EXISTS main.ryze_bi;
+Install `backend/requirements.txt`, then set the Snowflake connection in the backend environment:
 
-CREATE TABLE IF NOT EXISTS main.ryze_bi.customers (
-  id BIGINT, domain STRING, name STRING, segment STRING, region STRING,
-  account_number STRING, signup_date DATE, churned INT
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.products (
-  id BIGINT, domain STRING, name STRING, category STRING, unit_price DOUBLE
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.orders (
-  id BIGINT, domain STRING, customer_id BIGINT, order_date DATE,
-  status STRING, total_amount DOUBLE
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.order_items (
-  id BIGINT, domain STRING, order_id BIGINT, product_id BIGINT,
-  quantity INT, amount DOUBLE
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.claims (
-  id BIGINT, domain STRING, customer_id BIGINT, claim_date DATE,
-  amount DOUBLE, status STRING, policy_number STRING
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.glossary (
-  id BIGINT, domain STRING, business_term STRING, table_name STRING,
-  column_name STRING, description STRING
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS main.ryze_bi.live_events (
-  id BIGINT, domain STRING, event_type STRING, amount DOUBLE, created_at TIMESTAMP
-) USING DELTA;
+```env
+WAREHOUSE=snowflake
+SNOWFLAKE_ACCOUNT=<account-identifier>
+SNOWFLAKE_USER=<service-user>
+SNOWFLAKE_PASSWORD=<backend-only-secret>
+SNOWFLAKE_ROLE=<least-privilege-role>
+SNOWFLAKE_WAREHOUSE=<warehouse>
+SNOWFLAKE_DATABASE=<database>
+SNOWFLAKE_SCHEMA=PUBLIC
+LIVE_SIMULATE=false
 ```
 
-For existing tables, add only the fields your approved analytics workflow needs:
+The connector checks for the same ten application tables documented above and executes guarded, read-only `SELECT` queries. Use a dedicated role with warehouse usage and `SELECT` permissions on those tables. Snowflake remains the business-data source; the separate `DATABASE_URL` holds app accounts, query history, and review records. Never put Snowflake passwords in frontend configuration, source control, or chat.
 
-```sql
-ALTER TABLE main.ryze_bi.customers ADD COLUMN IF NOT EXISTS account_number STRING;
-ALTER TABLE main.ryze_bi.claims ADD COLUMN IF NOT EXISTS policy_number STRING;
-```
+### 1. Use the catalogs already in the workspace
 
-Populate them only with authorized, domain-scoped identifiers. Never store CVV/CVC or card security codes. Prefer vault-backed tokens or masked values where a full account number is not necessary.
+The dashboard uses the existing domain-specific `silver` schemas rather than assuming a shared `main.ryze_bi` schema:
 
-Load your approved business data into these tables. Use stable, unique IDs and valid customer/product/order foreign keys. Supported `domain` values are `banking`, `finance`, `insurance`, and `retail`. `claims` is required by the warehouse readiness check; non-insurance rows may be absent. Validate row counts and domain coverage before connecting:
+| Domain | Catalog | Dashboard source tables |
+|---|---|---|
+| Banking | `banking` | `accounts`, `branches`, `transactions`, `products`, `claims` |
+| Insurance | `insurance` | `policies`, `claims`, `products`, `payments`, `customers_with_payment_test_data` |
+| Retail | `retail` | `retail_orders`, `retail_products`, `retail_customers` |
 
-```sql
-SELECT domain, COUNT(*) FROM main.ryze_bi.customers GROUP BY domain;
-SELECT domain, COUNT(*) FROM main.ryze_bi.orders GROUP BY domain;
-SELECT domain, COUNT(*) FROM main.ryze_bi.order_items GROUP BY domain;
-SELECT domain, COUNT(*) FROM main.ryze_bi.products GROUP BY domain;
-SELECT domain, COUNT(*) FROM main.ryze_bi.claims GROUP BY domain;
-```
+The dashboard explicitly selects aggregate measures and safe dimensions. It does not select card numbers, CVV, passwords, phone numbers, or email addresses from the test-data columns. Finance is not present in the current workspace's accessible catalog list; configure an authorized Finance catalog and add it to `DATABRICKS_DOMAIN_CATALOGS` before enabling that domain's live dashboard.
 
-### 2. Grant the warehouse identity read access
-
-Use a dedicated service identity for the application and grant only the permissions it needs. Replace the example principal with the service-principal name or group configured in your workspace:
-
-```sql
-GRANT USE CATALOG ON CATALOG main TO `<application-principal>`;
-GRANT USE SCHEMA ON SCHEMA main.ryze_bi TO `<application-principal>`;
-GRANT SELECT ON SCHEMA main.ryze_bi TO `<application-principal>`;
-```
-
-The connector uses a Databricks access token (`DATABRICKS_TOKEN`) today. For production, store a rotated service identity token in your hosting platform's secret manager and restrict its lifetime, permissions, and network access. Do not use a developer's personal token for a production deployment.
+Grant the application service identity `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the applicable catalogs and `silver` schemas. The connector checks expected table names and can report a catalog/schema permission or table issue. Store the rotated `DATABRICKS_TOKEN` in the backend secret environment, not in source control, a frontend variable, or chat.
 
 ### 3. Configure and run the backend
 
@@ -150,8 +140,10 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/<warehouse-id>
 # Or omit DATABRICKS_HTTP_PATH and set DATABRICKS_WAREHOUSE_ID=<warehouse-id>.
 DATABRICKS_WAREHOUSE_ID=
 DATABRICKS_TOKEN=<backend-only-secret>
-DATABRICKS_CATALOG=<catalog>
-DATABRICKS_SCHEMA=ryze_bi
+DATABRICKS_CATALOG=banking
+DATABRICKS_SCHEMA=silver
+DATABRICKS_DOMAIN_CATALOGS=banking:banking,insurance:insurance,retail:retail
+DATABRICKS_DOMAIN_SCHEMA=silver
 LIVE_SIMULATE=false
 ```
 
@@ -165,11 +157,15 @@ JWT_SECRET=<random-secret-at-least-32-characters>
 DATABASE_URL=<persistent-postgresql-connection-url>
 ```
 
-Restart the backend after changing its environment. Sign in and open **Connect**. The **Check connections** action tests the warehouse and checks that all seven expected tables are queryable. A connection that succeeds but is missing a table or SELECT permission is not ready to run analytics.
+Restart the backend after changing its environment. Sign in and open **Connect**. **Run connection check** verifies the catalog and required tables for the signed-in user's domain; it is an explicit action rather than a slow call made whenever the profile loads. A connection that succeeds but is missing a table or SELECT permission is not ready to run analytics. The dashboard queries are adapted to the table/column names in these `silver` schemas; other chat and TabPFN workflows still require compatible business-table schemas.
+
+The **Benchmarks** page runs `POST /warehouse/verify`: it checks the active domain catalog/schema and expected tables, then executes a read-only representative aggregate and displays the SQL and returned values. It validates the data path; it does not claim model accuracy. For Banking, the configured schema has `customers.credit_score`, not the `fact_customers` table name in the Genie example. The verification query uses the existing `banking.silver.customers` source and returns the credit-score statistics and buckets directly from Databricks.
+
+Chat SQL reads use the authenticated domain's mapped catalog and schema. Before execution, source table names and any explicit catalog/schema qualifiers are checked against the retrieved domain schema; unavailable tables produce an explicit error instead of silently querying another domain. Query lineage shows actual Databricks source tables rather than inferred Bronze/Gold layers. `/me` reports configuration only; the **Monitor** page loads audit activity scoped to the signed-in user and domain. Remote dashboard aggregates are cached for 30 seconds and the browser refreshes them every 30 seconds to avoid repeatedly submitting nine warehouse queries while the page is open.
 
 ### 4. Verify every business domain
 
-Sign in with a user assigned to each configured domain (or use a development admin account), then run a small read-only query and open Analyze. The app scopes access with the signed-in domain; it does not automatically change `domain` based on the question. Demo user accounts should not be used in production.
+Sign in with a user assigned to each configured domain (or use a development admin account), then run a small read-only query and open Dashboard. The app scopes access with the signed-in domain; it does not automatically change `domain` based on the question. Demo user accounts should not be used in production.
 
 | Domain | Example chat question |
 |---|---|
@@ -178,7 +174,7 @@ Sign in with a user assigned to each configured domain (or use a development adm
 | Insurance | `What is the loss ratio by product?` |
 | Retail | `What is revenue by region?` |
 
-Check that the returned SQL is read-only, results match a direct warehouse query, charts/tables use the expected measures, and an audit entry appears. Use **Analyze** to inspect live dashboard metrics and **Connect** to verify which data mode is active.
+Check that the returned SQL is read-only, results match a direct warehouse query, charts/tables use the expected measures, and an audit entry appears. Use **Dashboard** to inspect live metrics, **Benchmarks** to run the direct aggregate check, **Monitor** to inspect scoped audit activity, and **Connect** to verify which data mode is active.
 
 For a non-demo installation, set `DEMO_MODE=false` and a unique `JWT_SECRET` (at least 32 characters) before starting the API. Startup rejects the development JWT secret in this mode. This prevents the application from creating or advertising the built-in demo users. New user passwords are stored as salted PBKDF2 hashes; existing demo hashes are upgraded after a successful login. Start the API once to initialize its authentication/history database, then create each real login interactively (the password is not passed as a command-line argument):
 

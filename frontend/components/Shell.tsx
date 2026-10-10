@@ -5,7 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const links = [
-  { href: "/dashboard", label: "Analyze" },
+  { href: "/context", label: "Context Intelligence" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/chat", label: "Ask" },
   { href: "/settings", label: "Connect" },
 ];
@@ -22,7 +23,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh" }}>
+    <div className="app-shell" style={{ minHeight: "100vh" }}>
       <header className="app-header">
         <div className="app-brand">
           <div className="app-brand__name">AI/BI</div>

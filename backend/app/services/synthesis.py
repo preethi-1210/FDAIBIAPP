@@ -2,6 +2,7 @@ from typing import Any
 
 from ..llm import complete_text
 from ..schemas import PredictionPayload, UncertaintyPayload
+from .conversation_context import format_conversation_context
 
 
 def synthesize(
@@ -12,6 +13,7 @@ def synthesize(
     uncertainty: UncertaintyPayload | None,
     domain: str = "retail",
     llm_override: str | None = None,
+    conversation_context: list[dict[str, str]] | None = None,
 ) -> str:
     preview = table[:12]
     pred_txt = ""
@@ -24,6 +26,7 @@ def synthesize(
             f"Values sample={prediction.values[:8]}."
         )
 
+    context = format_conversation_context(conversation_context)
     llm = complete_text(
         system=(
             "You are the Insight/Synthesis agent. Answer the user's BI question using the SQL result. "
@@ -31,7 +34,12 @@ def synthesize(
             "Then self-check: if the draft does not answer the original question, rewrite it. "
             "Return only the final answer."
         ),
-        user=f"Domain: {domain}\nQuestion: {question}\nSQL: {sql}\nRows: {preview}\n{pred_txt}",
+        user=(
+            f"Recent conversation for interpreting follow-up references:\n{context}\n"
+            f"Domain: {domain}\nQuestion: {question}\nSQL: {sql}\nRows: {preview}\n{pred_txt}"
+            if context
+            else f"Domain: {domain}\nQuestion: {question}\nSQL: {sql}\nRows: {preview}\n{pred_txt}"
+        ),
         override=llm_override,
     )
     if llm:

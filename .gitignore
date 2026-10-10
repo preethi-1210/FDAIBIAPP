@@ -1,6 +1,7 @@
 backend/.venv/
 .venv/
 backend/ryze_bi.db
+backend/.chroma/
 *.db
 .env
 .env.*

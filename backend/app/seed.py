@@ -7,7 +7,20 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine
 from .domains import DEMO_USERS, DOMAINS
-from .models import AppUser, Claim, Customer, Glossary, HitlReview, LiveEvent, Order, OrderItem, Product
+from .models import (
+    AppUser,
+    BankAccount,
+    BankLoan,
+    BankTransaction,
+    Claim,
+    Customer,
+    Glossary,
+    HitlReview,
+    LiveEvent,
+    Order,
+    OrderItem,
+    Product,
+)
 from .security import hash_password
 
 PRODUCTS = {
@@ -54,11 +67,13 @@ GLOSSARY = {
         ("region", "customers", "region", "Customer geography"),
     ],
     "banking": [
-        ("deposits", "orders", "total_amount", "Deposit / account flow amount"),
-        ("balance", "orders", "total_amount", "Balance-impacting amount"),
-        ("transaction", "orders", "id", "Banking transaction"),
+        ("deposits", "accounts", "balance", "Synthetic account deposit balance"),
+        ("balance", "accounts", "balance", "Current synthetic account balance"),
+        ("account", "accounts", "account_type", "Synthetic bank account"),
+        ("transaction", "transactions", "amount", "Synthetic bank transaction"),
+        ("loan", "loans", "outstanding_balance", "Synthetic loan outstanding balance"),
+        ("npl", "loans", "status", "Non-performing if loan status is delinquent"),
         ("churn", "customers", "churned", "1 if the account holder churned"),
-        ("npl", "orders", "status", "Non-performing if status is delinquent"),
     ],
     "finance": [
         ("aum", "orders", "total_amount", "Assets under management flow"),
@@ -115,6 +130,7 @@ def seed_if_empty(db: Session) -> None:
     if db.query(AppUser).count() > 0 and db.query(Customer).count() > 0:
         if settings.demo_mode:
             _seed_demo_sensitive_identifiers(db)
+            _seed_banking_demo_data(db)
         return
     rng = Random(42)
     for user in DEMO_USERS:
@@ -227,6 +243,96 @@ def seed_if_empty(db: Session) -> None:
                 created_at=datetime.utcnow(),
             )
         )
+    db.commit()
+    if settings.demo_mode:
+        _seed_banking_demo_data(db)
+
+
+def _seed_banking_demo_data(db: Session) -> None:
+    if db.query(BankAccount).count() > 0:
+        return
+    customers = db.query(Customer).filter(Customer.domain == "banking").order_by(Customer.id).all()
+    if not customers:
+        return
+
+    rng = Random(84)
+    account_types = ("checking", "savings", "money_market")
+    transactions: list[BankTransaction] = []
+    loans: list[BankLoan] = []
+    for customer in customers:
+        for account_index in range(1 if rng.random() < 0.72 else 2):
+            account_type = rng.choice(account_types)
+            account = BankAccount(
+                domain="banking",
+                customer_id=customer.id,
+                account_number=f"DEMO-BANK-{customer.id:06d}-{account_index + 1:02d}",
+                account_type=account_type,
+                balance=round(rng.uniform(250, 125000), 2),
+                status="active" if rng.random() < 0.96 else "dormant",
+                opened_date=customer.signup_date,
+            )
+            db.add(account)
+            db.flush()
+            for _ in range(rng.randint(3, 8)):
+                amount = round(rng.uniform(5, 4500), 2)
+                transactions.append(
+                    BankTransaction(
+                        domain="banking",
+                        account_id=account.id,
+                        transaction_date=date.today() - timedelta(days=rng.randint(0, 365)),
+                        transaction_type=rng.choice(
+                            ("deposit", "withdrawal", "payment", "transfer")
+                        ),
+                        amount=amount if rng.random() < 0.55 else -amount,
+                        status="posted" if rng.random() < 0.98 else "reversed",
+                        channel=rng.choice(("branch", "online", "mobile", "ATM")),
+                    )
+                )
+
+        if rng.random() < 0.42:
+            principal = round(rng.uniform(5000, 350000), 2)
+            outstanding = round(principal * rng.uniform(0.18, 1.0), 2)
+            origin = customer.signup_date
+            loans.append(
+                BankLoan(
+                    domain="banking",
+                    customer_id=customer.id,
+                    loan_type=rng.choice(("mortgage", "personal", "auto", "small_business")),
+                    principal_amount=principal,
+                    outstanding_balance=outstanding,
+                    interest_rate=round(rng.uniform(0.025, 0.16), 4),
+                    status="delinquent" if rng.random() < 0.08 else "performing",
+                    origination_date=origin,
+                    maturity_date=origin + timedelta(days=rng.randint(365, 365 * 30)),
+                )
+            )
+
+    db.add_all(transactions)
+    db.add_all(loans)
+    glossary_terms = (
+        ("account", "accounts", "account_type", "Synthetic bank account type"),
+        ("balance", "accounts", "balance", "Current synthetic bank account balance"),
+        ("transaction", "transactions", "amount", "Synthetic posted transaction amount"),
+        ("loan", "loans", "outstanding_balance", "Synthetic loan outstanding balance"),
+        ("npl", "loans", "status", "Non-performing if loan status is delinquent"),
+    )
+    existing_terms = {
+        term
+        for (term,) in db.query(Glossary.business_term)
+        .filter(Glossary.domain == "banking")
+        .all()
+    }
+    db.add_all(
+        Glossary(
+            domain="banking",
+            business_term=term,
+            table_name=table,
+            column_name=column,
+            description=description,
+        )
+        for term, table, column, description in glossary_terms
+        if term not in existing_terms
+    )
     db.commit()
 
 

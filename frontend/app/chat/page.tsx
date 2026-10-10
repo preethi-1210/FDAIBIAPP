@@ -14,7 +14,6 @@ import {
   ChevronDown,
   CircleHelp,
   Clock3,
-  Database,
   Folder,
   History,
   LoaderCircle,
@@ -24,6 +23,7 @@ import {
   Pin,
   Plus,
   Send,
+  ShieldCheck,
   Sparkles,
   SquarePen,
   Trash2,
@@ -38,17 +38,17 @@ import {
   SENSITIVE_DEMO_PROMPTS,
 } from "@/lib/sensitive-data";
 
-type Result = Parameters<typeof ResultWorkspace>[0]["result"];
+type Result = Parameters<typeof ResultWorkspace>[0]["result"] & { conversation_id?: string | null };
 type HistoryItem = {
   id: number;
   question: string;
   answer: string;
   sql?: string | null;
   result?: Result | null;
+  conversation_id?: string | null;
   created_at?: string;
 };
-type Conversation = {
-  id: string;
+type ConversationTurn = {
   question: string;
   answer: string;
   sql?: string | null;
@@ -56,8 +56,19 @@ type Conversation = {
   result?: Result;
   sensitiveWarning?: boolean;
 };
+type Conversation = {
+  id: string;
+  conversationId?: string;
+  question: string;
+  answer: string;
+  sql?: string | null;
+  created_at: string;
+  result?: Result;
+  turns?: ConversationTurn[];
+  sensitiveWarning?: boolean;
+};
 type ConversationMeta = { title?: string; pinned?: boolean };
-type Provider = "auto" | "openai" | "grok" | "ollama";
+type Provider = "auto" | "openai" | "grok" | "anthropic" | "ollama";
 
 const SUGGESTIONS = [
   { icon: Activity, title: "Weekly performance", question: "How many orders did we get last week?", detail: "Orders and revenue over the last week" },
@@ -76,6 +87,50 @@ const messageVariants: Variants = {
   hidden: { opacity: 0, y: 18 },
   visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 260, damping: 25 } },
 };
+
+function groupHistory(rows: HistoryItem[]): Conversation[] {
+  const grouped = new Map<string, Conversation>();
+  for (const row of rows) {
+    const conversationId = row.conversation_id || undefined;
+    const id = conversationId ? `thread-${conversationId}` : `history-${row.id}`;
+    const turn: ConversationTurn = {
+      question: row.question,
+      answer: row.answer,
+      sql: row.sql,
+      created_at: row.created_at || new Date().toISOString(),
+      result: row.result ?? undefined,
+    };
+    const existing = grouped.get(id);
+    if (existing) {
+      existing.turns?.push(turn);
+    } else {
+      grouped.set(id, {
+        id,
+        conversationId,
+        question: row.question,
+        answer: row.answer,
+        sql: row.sql,
+        created_at: turn.created_at,
+        result: turn.result,
+        turns: [turn],
+      });
+    }
+  }
+  return [...grouped.values()].map((conversation) => {
+    const turns = conversation.turns?.reverse() ?? [];
+    const first = turns[0];
+    const latest = turns[turns.length - 1];
+    return {
+      ...conversation,
+      question: first?.question ?? conversation.question,
+      answer: latest?.answer ?? conversation.answer,
+      sql: latest?.sql ?? conversation.sql,
+      created_at: latest?.created_at ?? conversation.created_at,
+      result: latest?.result,
+      turns,
+    };
+  });
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -131,14 +186,7 @@ export default function ChatPage() {
     api<HistoryItem[]>("/history")
       .then((rows) => {
         if (cancelled) return;
-        setConversations(rows.map((row) => ({
-          id: `history-${row.id}`,
-          question: row.question,
-          answer: row.answer,
-          sql: row.sql,
-          result: row.result ?? undefined,
-          created_at: row.created_at || new Date().toISOString(),
-        })));
+        setConversations(groupHistory(rows));
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not load your recent analyses.");
@@ -234,24 +282,57 @@ export default function ChatPage() {
 
   async function runQuestion(submitted: string) {
     if (!submitted || busy) return;
+    const selectedConversation = activeConversation;
     setBusy(true);
     setError("");
     try {
       const result = await api<Result>("/query", {
         method: "POST",
-        body: JSON.stringify({ question: submitted, llm_provider: provider === "auto" ? null : provider }),
+        body: JSON.stringify({
+          question: submitted,
+          llm_provider: provider === "auto" ? null : provider,
+          conversation_id: selectedConversation?.conversationId ?? null,
+        }),
       });
-      const id = `query-${result.audit_id || Date.now()}`;
-      const conversation: Conversation = {
-        id,
+      const turn: ConversationTurn = {
         question: submitted,
         answer: result.answer,
         sql: result.sql,
         created_at: new Date().toISOString(),
         result,
       };
-      setConversations((current) => [conversation, ...current]);
-      setActiveId(id);
+      const conversationId = result.conversation_id || selectedConversation?.conversationId;
+      if (selectedConversation?.conversationId && conversationId === selectedConversation.conversationId) {
+        setConversations((current) => current.map((item) => item.id === selectedConversation.id
+          ? {
+              ...item,
+              answer: turn.answer,
+              sql: turn.sql,
+              created_at: turn.created_at,
+              result,
+              turns: [...(item.turns ?? [{
+                question: item.question,
+                answer: item.answer,
+                sql: item.sql,
+                created_at: item.created_at,
+                result: item.result,
+              }]), turn],
+            }
+          : item));
+        setActiveId(selectedConversation.id);
+      } else {
+        const id = conversationId
+          ? `thread-${conversationId}`
+          : `query-${result.audit_id || Date.now()}`;
+        const conversation: Conversation = {
+          id,
+          conversationId: conversationId ?? undefined,
+          ...turn,
+          turns: [turn],
+        };
+        setConversations((current) => [conversation, ...current]);
+        setActiveId(id);
+      }
       setQuestion("");
       setSidebarOpen(false);
     } catch (cause) {
@@ -298,6 +379,42 @@ export default function ChatPage() {
 
   return (
     <main className="chat-app">
+      <header className="chat-brandbar">
+        <Link href="/" className="chat-brandbar__brand">
+          <span className="chat-brandbar__mark"><BarChart3 size={17} /></span>
+          <span>RYZE <b>AI/BI</b></span>
+        </Link>
+        <span className="chat-brandbar__edition">GOVERNED BUSINESS ASSISTANT</span>
+        <div className="chat-brandbar__account">
+          <span className="chat-brandbar__user">{username || "Analyst"}</span>
+          <span className="chat-brandbar__domain">{domain}</span>
+          <label className="chat-provider">
+            <span className="sr-only">Language model provider</span>
+            <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
+              <option value="auto">Auto</option>
+              <option value="openai">OpenAI</option>
+              <option value="grok">Grok</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="ollama">Ollama</option>
+            </select>
+            <ChevronDown size={13} />
+          </label>
+        </div>
+      </header>
+      <div className="chat-systembar">
+        <span><ShieldCheck size={13} /> Governed analytics</span>
+        <span className="chat-systembar__separator" />
+        <span>Questions and results stay scoped to your signed-in business domain.</span>
+        <span className="chat-systembar__domain">{domain}</span>
+      </div>
+      <nav className="chat-module-nav" aria-label="Ask workspace">
+        <button type="button" className="chat-icon-button chat-menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu size={17} /></button>
+        <Link href="/chat" className="chat-module-nav__link chat-module-nav__link--active"><Sparkles size={13} /> Ask</Link>
+        <Link href="/monitor" className="chat-module-nav__link"><Activity size={13} /> Monitor</Link>
+        <Link href="/benchmarks" className="chat-module-nav__link"><Check size={13} /> Benchmark</Link>
+      </nav>
+
+      <div className="chat-workspace">
       <AnimatePresence>
         {sidebarOpen && (
           <motion.button
@@ -312,10 +429,8 @@ export default function ChatPage() {
         )}
       </AnimatePresence>
 
-      <motion.aside
+      <aside
         className={`chat-sidebar${sidebarOpen ? " chat-sidebar--open" : ""}`}
-        initial={false}
-        animate={reduceMotion ? undefined : { x: 0 }}
         aria-label="Conversation navigation"
       >
         <div className="chat-sidebar__top">
@@ -402,33 +517,9 @@ export default function ChatPage() {
             <ArrowLeft size={16} />
           </button>
         </div>
-      </motion.aside>
+      </aside>
 
       <section className="chat-main">
-        <header className="chat-topbar">
-          <button type="button" className="chat-icon-button chat-menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
-          <div className="chat-topbar__title">
-            <span className="chat-topbar__mobile-brand">FD AIBI</span>
-            <span className="chat-domain-chip"><span /> {domain}</span>
-          </div>
-          <div className="chat-topbar__actions">
-            <label className="chat-provider">
-              <span className="sr-only">Language model provider</span>
-              <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-                <option value="auto">Auto</option>
-                <option value="openai">OpenAI</option>
-                <option value="grok">Grok</option>
-                <option value="ollama">Ollama</option>
-              </select>
-              <ChevronDown size={13} />
-            </label>
-            <Link href="/dashboard" className="chat-dashboard-link"><BarChart3 size={15} /><span>Analyze</span></Link>
-            <Link href="/settings" className="chat-connect-link" aria-label="Data connection status" title="Data connection status">
-              <Database size={15} /><span>Connect</span>
-            </Link>
-          </div>
-        </header>
-
         <div className={`chat-scroll-area${isConversationActive ? " chat-scroll-area--conversation" : ""}${busy ? " chat-scroll-area--busy" : ""}`}>
           {!isConversationActive ? (
             <motion.div className="chat-welcome" initial="hidden" animate="visible" variants={{ visible: { transition: { staggerChildren: 0.07 } } }}>
@@ -481,39 +572,43 @@ export default function ChatPage() {
             <div className="chat-thread">
               <AnimatePresence mode="popLayout">
                 <motion.article key={activeConversation.id} className="chat-exchange" variants={messageVariants} initial="hidden" animate="visible" exit={{ opacity: 0, y: -8 }} layout>
-                  <div className="chat-user-message">
-                    <div className="chat-message-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
-                    <div><span className="chat-message-label">You</span><p>{activeConversation.question}</p></div>
-                  </div>
-                  <div className={`chat-assistant-message${activeConversation.sensitiveWarning ? " chat-assistant-message--warning" : ""}`}>
-                    <div className="chat-assistant-avatar">
-                      {activeConversation.sensitiveWarning ? <TriangleAlert size={16} /> : <Sparkles size={16} />}
-                    </div>
-                    <div className="chat-assistant-content">
-                      <div className="chat-assistant-heading">
-                        <span>{activeConversation.sensitiveWarning ? "Sensitive-data notice" : "FD AIBI"}</span>
-                        {activeConversation.sensitiveWarning
-                          ? <small className="chat-sensitive-warning__label">Protected information</small>
-                          : <small><Check size={12} /> Analysis complete</small>}
+                  {(activeConversation.turns?.length ? activeConversation.turns : [activeConversation]).map((turn, index) => (
+                    <div key={`${activeConversation.id}-${index}`}>
+                      <div className="chat-user-message">
+                        <div className="chat-message-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
+                        <div><span className="chat-message-label">You</span><p>{turn.question}</p></div>
                       </div>
-                      {activeConversation.sensitiveWarning ? (
-                        <p className="chat-answer-text chat-answer-text--warning" role="alert">
-                          <TriangleAlert size={16} aria-hidden="true" />
-                          <span>{activeConversation.answer}</span>
-                        </p>
-                      ) : <p className="chat-answer-text">{activeConversation.answer}</p>}
-                      {!activeConversation.sensitiveWarning && restoringId === activeConversation.id ? (
-                        <div className="chat-sidebar-empty"><LoaderCircle size={14} className="chat-spin" /> Restoring charts and analysis details…</div>
-                      ) : !activeConversation.sensitiveWarning && activeConversation.result ? (
-                        <div className="chat-result-surface"><ResultWorkspace result={activeConversation.result} /></div>
-                      ) : !activeConversation.sensitiveWarning && activeConversation.sql ? (
-                        <details className="chat-sql-details">
-                          <summary>View generated SQL</summary>
-                          <pre>{activeConversation.sql}</pre>
-                        </details>
-                      ) : null}
+                      <div className={`chat-assistant-message${turn.sensitiveWarning ? " chat-assistant-message--warning" : ""}`}>
+                        <div className="chat-assistant-avatar">
+                          {turn.sensitiveWarning ? <TriangleAlert size={16} /> : <Sparkles size={16} />}
+                        </div>
+                        <div className="chat-assistant-content">
+                          <div className="chat-assistant-heading">
+                            <span>{turn.sensitiveWarning ? "Sensitive-data notice" : "FD AIBI"}</span>
+                            {turn.sensitiveWarning
+                              ? <small className="chat-sensitive-warning__label">Protected information</small>
+                              : <small><Check size={12} /> Analysis complete</small>}
+                          </div>
+                          {turn.sensitiveWarning ? (
+                            <p className="chat-answer-text chat-answer-text--warning" role="alert">
+                              <TriangleAlert size={16} aria-hidden="true" />
+                              <span>{turn.answer}</span>
+                            </p>
+                          ) : <p className="chat-answer-text">{turn.answer}</p>}
+                          {!turn.sensitiveWarning && restoringId === activeConversation.id ? (
+                            <div className="chat-sidebar-empty"><LoaderCircle size={14} className="chat-spin" /> Restoring charts and analysis details…</div>
+                          ) : !turn.sensitiveWarning && turn.result ? (
+                            <div className="chat-result-surface"><ResultWorkspace result={turn.result} /></div>
+                          ) : !turn.sensitiveWarning && turn.sql ? (
+                            <details className="chat-sql-details">
+                              <summary>View generated SQL</summary>
+                              <pre>{turn.sql}</pre>
+                            </details>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  ))}
                 </motion.article>
               </AnimatePresence>
               <div ref={messagesEndRef} />
@@ -582,6 +677,12 @@ export default function ChatPage() {
           <p className="chat-composer-disclaimer">AI-generated analysis can be wrong. Verify important business decisions against your source data.</p>
         </div>
       </section>
+      </div>
+      <footer className="chat-footer">
+        <span>RYZE AI/BI</span>
+        <span>Governed business intelligence</span>
+        <span>{domain} · Databricks Genie not used</span>
+      </footer>
     </main>
   );
 }

@@ -9,6 +9,7 @@ import {
   ArrowDown,
   ArrowRight,
   BarChart3,
+  Building2,
   Check,
   ChevronDown,
   CircleHelp,
@@ -16,6 +17,7 @@ import {
   EyeOff,
   LockKeyhole,
   Menu,
+  ShieldCheck,
   Sparkles,
   Store,
   WalletCards,
@@ -23,16 +25,18 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ContextArchitecture } from "@/components/ContextArchitecture";
 import { API_URL } from "@/lib/api";
 
-type Business = "Retail" | "SaaS" | "Finance";
+type Business = "Banking" | "Finance" | "Insurance" | "Retail";
 type Domain = { id: string; label: string };
 type DemoUser = { username: string; domain: string; password_hint: string };
 
 const BUSINESS_METRICS: Record<Business, { label: string; value: string; change: string; points: string }> = {
-  Retail: { label: "Gross merchandise value", value: "$248,390", change: "+18.6%", points: "8,128 72,102 138,116 205,66 271,79 338,43 404,58 470,22 536,38 602,12" },
-  SaaS: { label: "Monthly recurring revenue", value: "$92,840", change: "+12.4%", points: "8,115 72,89 138,98 205,72 271,87 338,49 404,55 470,30 536,42 602,14" },
+  Banking: { label: "Deposit balances", value: "$8.42M", change: "+9.2%", points: "8,124 72,106 138,85 205,97 271,69 338,77 404,48 470,63 536,31 602,12" },
   Finance: { label: "Assets under management", value: "$8.42M", change: "+9.2%", points: "8,124 72,106 138,85 205,97 271,69 338,77 404,48 470,63 536,31 602,12" },
+  Insurance: { label: "Claims paid", value: "$2.8M", change: "+5.3%", points: "8,118 72,96 138,105 205,74 271,88 338,55 404,63 470,36 536,48 602,18" },
+  Retail: { label: "Gross merchandise value", value: "$248,390", change: "+18.6%", points: "8,128 72,102 138,116 205,66 271,79 338,43 404,58 470,22 536,38 602,12" },
 };
 
 const AI_INSIGHT =
@@ -57,7 +61,9 @@ export default function LandingPage() {
   const [typedInsight, setTypedInsight] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [domain, setDomain] = useState("retail");
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [domains, setDomains] = useState<Domain[]>([]);
   const [users, setUsers] = useState<DemoUser[]>([]);
   const [error, setError] = useState("");
@@ -149,10 +155,13 @@ export default function LandingPage() {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch(`${API_URL}/auth/login`, {
+      const signup = authMode === "signup";
+      const response = await fetch(`${API_URL}${signup ? "/auth/signup" : "/auth/login"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password, domain }),
+        body: JSON.stringify(signup
+          ? { username, password, domain, display_name: displayName }
+          : { username, password, domain }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || "Sign-in failed");
@@ -191,7 +200,7 @@ export default function LandingPage() {
         <nav className="hidden items-center gap-8 text-sm text-slate-400 md:flex" aria-label="Main navigation">
           <a className="transition hover:text-white" href="#platform">Platform</a>
           <a className="transition hover:text-white" href="#businesses">Businesses</a>
-          <a className="transition hover:text-white" href="#demo">Live demo</a>
+          <a className="transition hover:text-white" href="#context-layer">Context layer</a>
         </nav>
         <div className="hidden items-center gap-3 md:flex">
           <button onClick={openLogin} className="rounded-lg px-4 py-2 text-sm text-slate-300 transition hover:text-white">Log in</button>
@@ -218,6 +227,7 @@ export default function LandingPage() {
             >
               <a onClick={() => setMenuOpen(false)} className="rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-white/5" href="#platform">Platform</a>
               <a onClick={() => setMenuOpen(false)} className="rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-white/5" href="#businesses">Businesses</a>
+              <a onClick={() => setMenuOpen(false)} className="rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-white/5" href="#context-layer">Context layer</a>
               <button onClick={openLogin} className="rounded-lg px-3 py-3 text-left text-sm text-cyan-200 hover:bg-white/5">Login / Get Started</button>
             </motion.nav>
           )}
@@ -237,7 +247,7 @@ export default function LandingPage() {
             A multi-tenant, multi-business AI analytics platform that turns trusted data into clear answers for every team, domain, and decision.
           </motion.p>
           <motion.div variants={riseIn} transition={transition} className="mt-8 flex flex-wrap gap-3">
-            <a href="#demo" className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_rgba(34,211,238,.2)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_38px_rgba(34,211,238,.28)]">
+            <a href="#context-layer" className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-[0_8px_30px_rgba(34,211,238,.2)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_38px_rgba(34,211,238,.28)]">
               Watch Demo <ArrowDown size={16} className="transition group-hover:translate-y-0.5" />
             </a>
             <button onClick={openLogin} className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.035] px-5 py-3 text-sm font-semibold text-slate-100 transition hover:border-cyan-200/40 hover:bg-white/[0.07]">
@@ -260,11 +270,12 @@ export default function LandingPage() {
             <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">Switch contexts, not tools.</h2>
             <p className="mt-3 max-w-lg text-sm leading-6 text-slate-400">Keep business-specific metrics and access in view while your analytics workflow stays consistent.</p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {([
-              { title: "Retail", desc: "Sales, stores & customers", icon: Store, color: "text-cyan-300", glow: "border-cyan-300/15" },
-              { title: "SaaS", desc: "Revenue, growth & churn", icon: BarChart3, color: "text-violet-300", glow: "border-violet-300/15" },
-              { title: "Finance", desc: "AUM, flows & risk", icon: WalletCards, color: "text-emerald-300", glow: "border-emerald-300/15" },
+              { title: "Retail", desc: "Orders, products & stores", icon: Store, color: "text-cyan-300", glow: "border-cyan-300/15" },
+              { title: "Banking", desc: "Accounts, transactions & branches", icon: Building2, color: "text-violet-300", glow: "border-violet-300/15" },
+              { title: "Insurance", desc: "Policies, claims & premiums", icon: ShieldCheck, color: "text-emerald-300", glow: "border-emerald-300/15" },
+              { title: "Finance", desc: "Accounts, budgets & revenue", icon: WalletCards, color: "text-sky-300", glow: "border-sky-300/15" },
             ] as const).map(({ title, desc, icon: Icon, color, glow }, index) => (
               <motion.button
                 key={title}
@@ -283,6 +294,28 @@ export default function LandingPage() {
               </motion.button>
             ))}
           </div>
+        </div>
+      </section>
+
+      <section id="context-layer" className="relative z-10 mx-auto max-w-7xl scroll-mt-8 px-5 py-14 sm:px-8 md:py-20">
+        <div className="mb-7 max-w-2xl">
+          <p className="text-xs font-medium uppercase tracking-[0.2em] text-indigo-300/80">Context intelligence · {business}</p>
+          <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">See how business context shapes every answer.</h2>
+          <p className="mt-3 text-sm leading-6 text-slate-400">
+            Follow the path from source metadata through business meaning and access controls to evidence-backed insights.
+          </p>
+        </div>
+        <div className="rounded-3xl border border-white/[0.09] bg-[#0c1320]/85 p-4 shadow-[0_22px_70px_rgba(0,0,0,.24)] sm:p-6">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-100">Interactive context architecture</h3>
+              <p className="mt-1 text-xs text-slate-500">Choose a layer to inspect how it contributes.</p>
+            </div>
+            <span className="rounded-full border border-amber-200/15 bg-amber-200/[0.06] px-3 py-1.5 text-[10px] text-amber-100/80">
+              Sample walkthrough · not live data
+            </span>
+          </div>
+          <ContextArchitecture sampleMode domainLabel={business} />
         </div>
       </section>
 
@@ -326,10 +359,31 @@ export default function LandingPage() {
               </button>
               <div className="mb-6 grid size-12 place-items-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-200"><LockKeyhole size={21} /></div>
               <p className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-300/80">Welcome to FD AIBI</p>
-              <h2 id="login-title" className="mt-2 text-2xl font-semibold tracking-tight text-white">Sign in to your workspace</h2>
-              <p id="login-description" className="mt-2 text-sm text-slate-400">Choose your business and continue to your analytics workspace.</p>
+              <h2 id="login-title" className="mt-2 text-2xl font-semibold tracking-tight text-white">
+                {authMode === "signup" ? "Create your workspace account" : "Sign in to your workspace"}
+              </h2>
+              <p id="login-description" className="mt-2 text-sm text-slate-400">
+                {authMode === "signup"
+                  ? "Create an analyst account for one business domain."
+                  : "Choose your business and continue to your analytics workspace."}
+              </p>
 
               <form onSubmit={onLogin} className="fd-login-form mt-7 space-y-4">
+                {authMode === "signup" && (
+                  <label className="block text-sm text-slate-300">
+                    Display name
+                    <input
+                      autoComplete="name"
+                      maxLength={120}
+                      minLength={1}
+                      required
+                      value={displayName}
+                      onChange={(event) => setDisplayName(event.target.value)}
+                      className="fd-login-field login-field mt-2 w-full"
+                      placeholder="Your name"
+                    />
+                  </label>
+                )}
                 <label className="block text-sm text-slate-300">
                   Business domain
                   <span className="relative mt-2 block">
@@ -346,12 +400,12 @@ export default function LandingPage() {
                 </label>
                 <label className="block text-sm text-slate-300">
                   Username
-                  <input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} className="fd-login-field login-field mt-2 w-full" placeholder="Enter your username" />
+                  <input autoComplete="username" required minLength={3} maxLength={40} pattern="[-A-Za-z0-9_.]+" value={username} onChange={(event) => setUsername(event.target.value)} className="fd-login-field login-field mt-2 w-full" placeholder="Enter your username" />
                 </label>
                 <label className="block text-sm text-slate-300">
                   Password
                   <span className="relative mt-2 block">
-                    <input type={showPassword ? "text" : "password"} autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} className="fd-login-field login-field w-full pr-11" placeholder="Enter your password" />
+                    <input type={showPassword ? "text" : "password"} autoComplete={authMode === "signup" ? "new-password" : "current-password"} required minLength={authMode === "signup" ? 12 : 1} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} className="fd-login-field login-field w-full pr-11" placeholder={authMode === "signup" ? "Use at least 12 characters" : "Enter your password"} />
                     <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-slate-200" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>
                       {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
                     </button>
@@ -359,10 +413,23 @@ export default function LandingPage() {
                 </label>
                 {error && <p role="alert" className="rounded-xl border border-rose-400/20 bg-rose-400/[0.07] px-3 py-2.5 text-sm text-rose-200">{error}</p>}
                 <button type="submit" disabled={busy} className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_6px_24px_rgba(34,211,238,.17)] transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60">
-                  {busy ? "Signing in…" : "Continue to workspace"} {!busy && <ArrowRight size={16} className="transition group-hover:translate-x-0.5" />}
+                  {busy ? (authMode === "signup" ? "Creating account…" : "Signing in…") : (authMode === "signup" ? "Create account" : "Continue to workspace")} {!busy && <ArrowRight size={16} className="transition group-hover:translate-x-0.5" />}
                 </button>
               </form>
-              {users.length > 0 && (
+              <p className="mt-4 text-center text-sm text-slate-400">
+                {authMode === "signup" ? "Already have an account?" : "New to FD AIBI?"}{" "}
+                <button
+                  type="button"
+                  className="font-medium text-cyan-200 transition hover:text-white"
+                  onClick={() => {
+                    setAuthMode((mode) => mode === "signup" ? "login" : "signup");
+                    setError("");
+                  }}
+                >
+                  {authMode === "signup" ? "Sign in" : "Create an account"}
+                </button>
+              </p>
+              {authMode === "login" && users.length > 0 && (
                 <div className="mt-5 border-t border-white/[0.08] pt-4">
                   <p className="mb-2 text-xs text-slate-500">Demo accounts</p>
                   <div className="flex flex-wrap gap-2">
@@ -407,9 +474,10 @@ function DashboardDemo({
 }) {
   const reduceMotion = useReducedMotion();
   const metricValues: Record<Business, [string, string, string]> = {
-    Retail: ["12.8k", "4.6%", "3.2 days"],
-    SaaS: ["3.4k", "7.1%", "2.4 days"],
+    Banking: ["12.8k", "4.6%", "3.2 days"],
     Finance: ["8.4M", "2.3%", "1.8 days"],
+    Insurance: ["3.4k", "7.1%", "2.4 days"],
+    Retail: ["12.8k", "4.6%", "3.2 days"],
   };
 
   return (
@@ -421,7 +489,7 @@ function DashboardDemo({
       className="relative mx-auto w-full max-w-[660px] scroll-mt-8"
     >
       <motion.div aria-hidden="true" animate={reduceMotion ? undefined : { y: [0, -9, 0] }} transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }} className="absolute -right-3 -top-7 z-20 hidden rounded-xl border border-cyan-200/20 bg-slate-900/90 px-3 py-2 shadow-[0_10px_35px_rgba(34,211,238,.12)] backdrop-blur-xl sm:block">
-        <div className="flex items-center gap-2 text-xs text-slate-300"><span className="size-1.5 rounded-full bg-emerald-300 shadow-[0_0_10px_#6ee7b7]" /> Live data connected</div>
+        <div className="flex items-center gap-2 text-xs text-slate-300"><span className="size-1.5 rounded-full bg-amber-300" /> Sample preview</div>
       </motion.div>
       <motion.div aria-hidden="true" animate={reduceMotion ? undefined : { y: [0, 8, 0] }} transition={{ duration: 5.2, repeat: Infinity, ease: "easeInOut", delay: 0.4 }} className="absolute -bottom-7 -left-4 z-20 hidden rounded-xl border border-violet-200/15 bg-slate-900/90 px-3 py-2 shadow-[0_10px_35px_rgba(167,139,250,.12)] backdrop-blur-xl sm:block">
         <div className="flex items-center gap-2 text-xs text-slate-300"><Sparkles size={13} className="text-violet-300" /> AI analysis complete</div>
@@ -431,21 +499,21 @@ function DashboardDemo({
         <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3.5 sm:px-5">
           <div className="flex items-center gap-2">
             <span className="flex gap-1.5"><i className="size-2 rounded-full bg-rose-400/80" /><i className="size-2 rounded-full bg-amber-300/80" /><i className="size-2 rounded-full bg-emerald-300/80" /></span>
-            <span className="ml-2 text-xs text-slate-400">Analytics workspace</span>
+            <span className="ml-2 text-xs text-slate-400">Sample analytics preview</span>
           </div>
-          <span className="hidden items-center gap-1.5 text-[10px] text-slate-500 sm:flex"><span className="size-1.5 animate-pulse rounded-full bg-emerald-300" /> Updated just now</span>
+          <span className="hidden items-center gap-1.5 text-[10px] text-slate-500 sm:flex">Illustrative data · not live</span>
         </div>
 
         <div className="p-4 sm:p-6">
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Business overview</p>
-              <h2 className="mt-1 text-lg font-semibold text-white">Good morning, Alex</h2>
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Business overview · sample</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Your business overview</h2>
             </div>
             <label className="relative inline-flex items-center">
               <span className="sr-only">Choose demo business</span>
               <select value={business} onChange={(event) => setBusiness(event.target.value as Business)} className="appearance-none rounded-lg border border-white/10 bg-white/[0.045] py-2 pl-3 pr-9 text-xs text-slate-200 outline-none transition hover:border-cyan-200/30 focus:border-cyan-200/50">
-                {(["Retail", "SaaS", "Finance"] as const).map((item) => <option className="bg-slate-900" key={item}>{item}</option>)}
+                {(["Retail", "Banking", "Insurance", "Finance"] as const).map((item) => <option className="bg-slate-900" key={item}>{item}</option>)}
               </select>
               <ChevronDown size={14} className="pointer-events-none absolute right-3 text-slate-500" />
             </label>
@@ -459,7 +527,7 @@ function DashboardDemo({
 
           <div className="mt-4 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-3.5 sm:p-4">
             <div className="mb-3 flex items-center justify-between">
-              <div><p className="text-xs font-medium text-slate-200">Performance trend</p><p className="mt-0.5 text-[10px] text-slate-500">Revenue · last 30 days</p></div>
+              <div><p className="text-xs font-medium text-slate-200">Illustrative performance trend</p><p className="mt-0.5 text-[10px] text-slate-500">Sample values · last 30 days</p></div>
               <span className="rounded-md bg-emerald-300/10 px-2 py-1 text-[10px] font-medium text-emerald-200">{metrics.change}</span>
             </div>
             <div className="relative h-32 w-full">
@@ -487,7 +555,7 @@ function DashboardDemo({
                   animate={{ pathLength: 1, opacity: 1 }}
                   transition={{ duration: 1.7, delay: 0.55, ease: "easeInOut" }}
                 />
-                <motion.circle cx="602" cy={business === "Retail" ? "12" : business === "SaaS" ? "14" : "12"} r="4.5" fill="#67e8f9" initial={{ scale: 0 }} animate={{ scale: [0.8, 1.2, 1] }} transition={{ delay: 2, duration: 0.45 }} />
+                <motion.circle cx="602" cy={business === "Insurance" ? "18" : "12"} r="4.5" fill="#67e8f9" initial={{ scale: 0 }} animate={{ scale: [0.8, 1.2, 1] }} transition={{ delay: 2, duration: 0.45 }} />
               </svg>
             </div>
             <div className="mt-1 flex justify-between text-[9px] text-slate-600"><span>01 JUN</span><span>08 JUN</span><span>15 JUN</span><span>22 JUN</span><span>30 JUN</span></div>
@@ -497,13 +565,15 @@ function DashboardDemo({
             <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-cyan-200/15 bg-cyan-200/[0.08] text-cyan-200"><Sparkles size={15} /></span>
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-xs font-medium text-cyan-100">
-                AI insight
-                <span className="inline-flex items-center gap-1 text-[9px] font-normal text-slate-500"><span className="size-1 rounded-full bg-cyan-300 shadow-[0_0_8px_#67e8f9]" /> analyzing</span>
+                Example insight
+                <span className="inline-flex items-center gap-1 text-[9px] font-normal text-slate-500">illustrative</span>
               </div>
               <p className="mt-1.5 min-h-9 text-[11px] leading-5 text-slate-300 sm:text-xs">
-                {business === "Retail" ? typedInsight : business === "SaaS"
-                  ? "Monthly recurring revenue is growing steadily, led by improved retention among mid-market accounts."
-                  : "Assets under management continue to rise, with balanced growth across managed portfolios."}
+                {business === "Retail" ? typedInsight : business === "Banking"
+                  ? "Deposit balances are trending upward across the selected business context."
+                  : business === "Insurance"
+                    ? "Claims activity is summarized using the selected insurance business context."
+                    : "Assets under management are summarized using the selected finance context."}
                 {business === "Retail" && typedInsight.length < AI_INSIGHT.length && <span className="ml-0.5 inline-block h-3.5 w-px animate-pulse bg-cyan-300 align-middle" />}
               </p>
             </div>
