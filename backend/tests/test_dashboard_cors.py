@@ -37,13 +37,13 @@ class DashboardCorsTests(unittest.TestCase):
             },
         ):
             response = self.client.get(
-                "/dashboard", headers={"Origin": "http://localhost:3001"}
+                "/dashboard", headers={"Origin": "http://localhost:3000"}
             )
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.headers["access-control-allow-origin"],
-            "http://localhost:3001",
+            "http://localhost:3000",
         )
         self.assertIn("WAREHOUSE=local", response.json()["detail"])
         self.assertIn("DATABRICKS_SERVER_HOSTNAME", response.json()["detail"])
@@ -70,20 +70,20 @@ class DashboardCorsTests(unittest.TestCase):
             side_effect=RuntimeError("unexpected test failure"),
         ):
             response = self.client.get(
-                "/dashboard", headers={"Origin": "http://localhost:3001"}
+                "/dashboard", headers={"Origin": "http://localhost:3000"}
             )
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(
             response.headers["access-control-allow-origin"],
-            "http://localhost:3001",
+            "http://localhost:3000",
         )
 
     def test_preflight_allows_dashboard_authorization_headers(self) -> None:
         response = self.client.options(
             "/dashboard",
             headers={
-                "Origin": "http://localhost:3001",
+                "Origin": "http://localhost:3000",
                 "Access-Control-Request-Method": "GET",
                 "Access-Control-Request-Headers": "authorization,content-type",
             },
@@ -92,9 +92,27 @@ class DashboardCorsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.headers["access-control-allow-origin"],
-            "http://localhost:3001",
+            "http://localhost:3000",
         )
         self.assertIn("authorization", response.headers["access-control-allow-headers"])
+
+    def test_request_id_is_returned_for_correlation(self) -> None:
+        response = self.client.get("/auth/domains", headers={"X-Request-ID": "test-trace-123"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-request-id"], "test-trace-123")
+
+    def test_cookie_authenticated_writes_require_an_allowed_origin(self) -> None:
+        blocked = self.client.post(
+            "/auth/logout",
+            headers={"Cookie": "ryze_session=example", "Origin": "https://untrusted.example"},
+        )
+        allowed = self.client.post(
+            "/auth/logout",
+            headers={"Cookie": "ryze_session=example", "Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn("ryze_session=", allowed.headers["set-cookie"])
 
 
 if __name__ == "__main__":

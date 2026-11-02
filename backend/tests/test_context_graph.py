@@ -4,6 +4,19 @@ from app.services.context_graph import ContextGraphService
 
 
 class ContextGraphTests(unittest.TestCase):
+    def test_remote_schema_without_relationship_graph_still_resolves_context(self) -> None:
+        graph = ContextGraphService()
+        graph.domain_tables["banking"] = {
+            "customers": [{"name": "customer_id", "type": "STRING"}],
+            "accounts": [{"name": "balance", "type": "DECIMAL"}],
+        }
+        graph.graph.add_node("local_only_table")
+
+        result = graph.resolve("Show customers and account balances", "banking")
+
+        self.assertEqual(set(result["tables"]), {"customers", "accounts"})
+        self.assertEqual(result["join_paths"], [])
+
     def test_sensitive_lookup_can_inspect_tables_outside_question_context(self) -> None:
         graph = ContextGraphService()
         graph.tables = {

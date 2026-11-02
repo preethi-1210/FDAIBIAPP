@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { Check, CircleAlert, LoaderCircle } from "lucide-react";
-import { AutoChart, PALETTES, PalettePicker } from "@/components/Charts";
+import {
+  ChartTypePicker,
+  CHART_COLORS,
+  DynamicChart,
+  useChartType,
+} from "@/components/Charts";
 import { api } from "@/lib/api";
 
 type Result = {
@@ -32,17 +37,32 @@ type Result = {
     note: string;
   };
   guardrails?: { ok: boolean; error?: string; checks: { name: string; pass: boolean }[] };
-  hitl?: { status: string; audit_id: string };
+  hitl?: { status: string; audit_id: string; review_id?: number; reason?: string; reviewed_by?: string };
   model_gov?: Record<string, string | boolean>;
+  status?: string;
+  trace?: { stage: string; engine: string; ok: boolean; detail?: string | null; latency_ms?: number | null }[];
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  planner: "Planner",
+  sql_generation: "SQL generation",
+  sql_validation: "SQL validation",
+  sql_execution: "Query execution",
+  data_availability: "Data availability",
+  feature_builder: "Feature builder",
+  prediction: "Prediction",
+  hitl: "Human review",
+  grounding_check: "Grounding check",
+  synthesis: "Answer",
 };
 
 const TABS = ["Insight", "Lineage", "Guardrails", "HITL", "Model gov", "Audit"] as const;
 
 export function ResultWorkspace({ result }: { result: Result }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>("Insight");
-  const [palette, setPalette] = useState("slate");
+  const [chartType, setChartType] = useChartType();
   const [filterView, setFilterView] = useState<string | null>(null);
-  const colors = PALETTES[palette];
+  const colors = CHART_COLORS;
 
   useEffect(() => {
     setTab("Insight");
@@ -67,7 +87,14 @@ export function ResultWorkspace({ result }: { result: Result }) {
         ))}
       </div>
       <div id="result-workspace-panel" className="result-workspace__panel" role="tabpanel" aria-label={`${tab} results`}>
-        {tab === "Insight" ? <Insight result={result} colors={colors} palette={palette} onPalette={setPalette} /> : null}
+        {tab === "Insight" ? (
+          <Insight
+            result={result}
+            colors={colors}
+            chartType={chartType}
+            onChartType={setChartType}
+          />
+        ) : null}
         {tab === "Lineage" ? result.lineage ? (
           <Lineage lineage={result.lineage} filterView={filterView} onFilter={setFilterView} />
         ) : <UnavailablePanel title="Lineage was not included in this result." /> : null}
@@ -87,13 +114,13 @@ export function ResultWorkspace({ result }: { result: Result }) {
 function Insight({
   result,
   colors,
-  palette,
-  onPalette,
+  chartType,
+  onChartType,
 }: {
   result: Result;
   colors: string[];
-  palette: string;
-  onPalette: (n: string) => void;
+  chartType: ReturnType<typeof useChartType>[0];
+  onChartType: ReturnType<typeof useChartType>[1];
 }) {
   return (
     <>
@@ -101,9 +128,21 @@ function Insight({
         <p>{result.answer}</p>
         <p style={{ fontSize: 14, color: "#4d6480" }}>
           Plan: {(result.plan?.subtasks || []).join(" → ") || "retrieval"}
-          {result.llm_provider ? ` · LLM ${result.llm_provider}` : " · heuristic"}
+          {/* Only providers that actually produced output are reported by the API. */}
+          {result.llm_provider ? ` · LLM used: ${result.llm_provider}` : " · No LLM output used"}
           {result.audit_id ? ` · ${result.audit_id}` : ""}
         </p>
+        {result.trace?.length ? (
+          <ol className="result-trace" aria-label="How this answer was produced">
+            {result.trace.map((step, index) => (
+              <li key={`${step.stage}-${index}`} className={step.ok ? "" : "result-trace__step--failed"}>
+                <b>{STAGE_LABELS[step.stage] ?? step.stage}</b>
+                <span>{step.engine}{step.latency_ms != null ? ` · ${step.latency_ms} ms` : ""}</span>
+                {step.detail ? <small>{step.detail}</small> : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
       </Card>
       {result.prediction ? <PredictionOutput prediction={result.prediction} uncertainty={result.uncertainty} /> : null}
       {result.sql ? (
@@ -112,10 +151,12 @@ function Insight({
         </Card>
       ) : null}
       {result.chart ? (
-        <Card title={`Chart · ${result.chart.type} · ${result.chart.y} by ${result.chart.x}`}>
-          <PalettePicker value={palette} onChange={onPalette} />
+        <Card title={`Chart · ${chartType} · ${result.chart.y} by ${result.chart.x}`}>
+          <div className="result-workspace__chart-controls">
+            <ChartTypePicker value={chartType} onChange={onChartType} />
+          </div>
           <div style={{ marginTop: 12 }}>
-            <AutoChart spec={result.chart} colors={colors} />
+            <DynamicChart type={chartType} data={result.chart.data} colors={colors} />
           </div>
         </Card>
       ) : null}
@@ -134,7 +175,7 @@ function Insight({
                 {result.table.slice(0, 40).map((row, i) => (
                   <tr key={i}>
                     {Object.keys(result.table[0]).map((k) => (
-                      <td key={k}>{String(row[k])}</td>
+                      <td key={k}>{formatResultCell(row[k], k)}</td>
                     ))}
                   </tr>
                 ))}
@@ -147,6 +188,17 @@ function Insight({
   );
 }
 
+function formatResultCell(value: unknown, column: string): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return String(value);
+  if (/(amount|balance|revenue|premium|sales|deposit|notional|aum|volume|value|price|cost|spend)/i.test(column)) {
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(value);
+  }
+  return String(value);
+}
+
 function PredictionOutput({
   prediction,
   uncertainty,
@@ -154,6 +206,26 @@ function PredictionOutput({
   prediction: NonNullable<Result["prediction"]>;
   uncertainty: Result["uncertainty"];
 }) {
+  if (prediction.type === "forecast") {
+    return (
+      <Card title="Prediction · self-hosted TabPFN · model output, not actual data">
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+            <thead><tr><th style={th}>Period</th><th style={th}>Projected value</th><th style={th}>80% range</th></tr></thead>
+            <tbody>
+              {prediction.labels.map((label, index) => (
+                <tr key={String(label)}>
+                  <td style={td}>{String(label)}</td>
+                  <td style={td}>{prediction.values[index]?.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                  <td style={td}>{uncertainty ? uncertainty.confidence_range.map((n) => n.toLocaleString(undefined, { maximumFractionDigits: 2 })).join(" – ") : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    );
+  }
   const classification = prediction.type === "classification";
   const rowCount = classification ? prediction.labels.length : prediction.values.length;
   const probabilityTitle = prediction.probability_label == null
@@ -222,7 +294,7 @@ function Lineage({
     <>
       <Card title="Lineage · medallion architecture">
         <p style={{ color: "#4d6480" }}>
-          Every figure traces to a governed gold view. Catalog <b>{lineage.catalog}</b>. Engine: {lineage.engine}.
+          Trace this result from the question through SQL and execution. Catalog <b>{lineage.catalog}</b>. Engine: {lineage.engine}.
         </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 12 }}>
           {lineage.medallion.map((m) => (
@@ -235,30 +307,34 @@ function Lineage({
           ))}
         </div>
       </Card>
-      <Card title="Gold views this session">
-        <p style={{ fontSize: 12, color: "#4d6480" }}>Click a view to filter the trace. ● queried · write dest · ○ idle</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
-          {lineage.views.map((v) => (
-            <button
-              key={v.id}
-              onClick={() => onFilter(filterView === v.id ? null : v.id)}
-              style={{
-                textAlign: "left",
-                border: filterView === v.id ? "2px solid #1f7aef" : "1px solid #dbe4f0",
-                borderRadius: 12,
-                padding: 10,
-                background: v.state === "idle" ? "#f8fafc" : "white",
-                cursor: "pointer",
-              }}
-            >
-              <div>
-                {v.state === "idle" ? "○" : "●"} {v.id}
-              </div>
-              <div style={{ fontSize: 12, color: "#4d6480" }}>{v.label}</div>
-              <div style={{ fontSize: 11 }}>{v.fqn}</div>
-            </button>
-          ))}
-        </div>
+      <Card title={lineage.views.length ? "Gold views this session" : "Execution path"}>
+        {lineage.views.length ? (
+          <>
+            <p style={{ fontSize: 12, color: "#4d6480" }}>Click a view to filter the trace. ● queried · write dest · ○ idle</p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
+              {lineage.views.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => onFilter(filterView === v.id ? null : v.id)}
+                  style={{
+                    textAlign: "left",
+                    border: filterView === v.id ? "2px solid #1f7aef" : "1px solid #dbe4f0",
+                    borderRadius: 12,
+                    padding: 10,
+                    background: v.state === "idle" ? "#f8fafc" : "white",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div>
+                    {v.state === "idle" ? "○" : "●"} {v.id}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#4d6480" }}>{v.label}</div>
+                  <div style={{ fontSize: 11 }}>{v.fqn}</div>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : <p style={{ fontSize: 12, color: "#4d6480" }}>This query read the listed live source tables directly; no gold view is claimed.</p>}
         <p style={{ fontSize: 12, marginTop: 12 }}>{lineage.flow.join(" → ")}</p>
         <p style={{ fontSize: 12, color: "#4d6480" }}>{lineage.note}</p>
       </Card>
@@ -299,11 +375,14 @@ function HitlPanel({ seed }: { seed?: Result["hitl"] }) {
     id: number;
     audit_id: string;
     question: string;
-    status: "pending" | "approved" | "rejected";
+    status: "pending" | "approved" | "rejected" | "completed";
     reason: string;
     user: string;
+    domain?: string;
+    reviewed_by?: string | null;
     created_at: string;
   };
+  const [viewer, setViewer] = useState<{ username: string; role: string } | null>(null);
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -311,6 +390,9 @@ function HitlPanel({ seed }: { seed?: Result["hitl"] }) {
 
   useEffect(() => {
     let cancelled = false;
+    api<{ username: string; role: string }>("/me")
+      .then((me) => { if (!cancelled) setViewer(me); })
+      .catch(() => undefined);
     api<ReviewRow[]>("/hitl")
       .then((data) => {
         if (!cancelled) setRows(data);
@@ -342,7 +424,10 @@ function HitlPanel({ seed }: { seed?: Result["hitl"] }) {
   return (
     <Card title="HITL review queue">
       <p style={{ fontSize: 14, color: "#4d6480" }}>
-        Prediction and failed-guardrail runs wait here. Current prompt: {seed?.status || "n/a"} ({seed?.audit_id})
+        {viewer?.role === "admin"
+          ? "Business users' prediction requests wait here for an administrator's decision. You cannot review your own requests."
+          : "Your prediction requests and their review status. An administrator approves or rejects them."}{" "}
+        Current prompt: {seed?.status || "n/a"} ({seed?.audit_id})
       </p>
       {error ? <div className="hitl-state hitl-state--error" role="alert"><CircleAlert size={17} /> {error}</div> : null}
       {loading ? <div className="hitl-state"><LoaderCircle className="chat-spin" size={18} /> Loading review requests…</div> : null}
@@ -364,14 +449,18 @@ function HitlPanel({ seed }: { seed?: Result["hitl"] }) {
                   <td>{row.user}</td>
                   <td><span className={`hitl-status hitl-status--${row.status}`}>{row.status}</span></td>
                   <td>
-                    {row.status === "pending" ? (
+                    {row.status === "pending" && viewer?.role === "admin" && viewer.username !== row.user ? (
                       <div className="hitl-actions">
                         <button type="button" disabled={busyId === row.id} onClick={() => void act(row.id, "approve")}>
                           {busyId === row.id ? "Saving…" : "Approve"}
                         </button>
                         <button type="button" disabled={busyId === row.id} onClick={() => void act(row.id, "reject")}>Reject</button>
                       </div>
-                    ) : <span className="hitl-decision-complete"><Check size={14} /> Recorded</span>}
+                    ) : row.status === "pending" ? (
+                      <span className="hitl-decision-complete">Awaiting an administrator</span>
+                    ) : (
+                      <span className="hitl-decision-complete"><Check size={14} /> {row.reviewed_by ? `By ${row.reviewed_by}` : "Recorded"}</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -408,7 +497,7 @@ function AuditMini({ result }: { result: Result }) {
     <Card title="Audit trail">
       <div>Audit ID: {result.audit_id}</div>
       <div>Rows: {result.table?.length || 0}</div>
-      <div>SQL logged · immutable session write to fdryze_audit_log</div>
+      <div>SQL and result metadata are saved in application query history.</div>
       <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{result.sql}</pre>
     </Card>
   );

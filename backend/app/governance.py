@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from sqlglot import exp, parse_one
+from sqlglot.errors import ParseError
+
 from .config import settings
 from .warehouse import databricks_domain_catalog
 
@@ -18,6 +21,7 @@ def catalog_name(domain: str) -> str:
     catalog_names = {
         "banking": "banking",
         "insurance": "insurance",
+        "finance": "banking",
         "retail": "retail",
     }
 
@@ -75,9 +79,51 @@ PLATFORM_VIEWS = [
 ]
 
 
-def extract_tables(sql: str | None) -> list[str]:
+def _sql_dialect() -> str:
+    if settings.warehouse in {"databricks", "snowflake"}:
+        return settings.warehouse
+    return "postgres" if settings.database_url.startswith("postgresql") else "sqlite"
+
+
+def source_tables(sql: str | None) -> list[tuple[str, ...]]:
+    """Table sources referenced by a statement as (catalog, schema, table) parts, CTEs excluded.
+
+    Parsed with sqlglot so that FROM inside function syntax such as EXTRACT(MONTH FROM col),
+    TRIM(BOTH ' ' FROM col) or SUBSTRING(col FROM 1) is not mistaken for a table. Unparseable SQL
+    falls back to the stricter regex reading, so validation never becomes more permissive.
+    """
     if not sql:
         return []
+    try:
+        tree = parse_one(sql, read=_sql_dialect())
+    except (ParseError, ValueError):
+        return [tuple(re.split(r"\s*\.\s*", name)) for name in _regex_source_names(sql)]
+    cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+    sources: list[tuple[str, ...]] = []
+    for table in tree.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier):
+            # Table-valued functions (read_files(...), etc.) are sources too; report them by
+            # their SQL so source validation rejects them as unauthorized.
+            parts: tuple[str, ...] = (table.this.sql(dialect=_sql_dialect()),)
+        else:
+            parts = tuple(part for part in (table.catalog, table.db, table.name) if part)
+            if len(parts) == 1 and parts[0].lower() in cte_names:
+                continue
+        if parts not in sources:
+            sources.append(parts)
+    return sources
+
+
+def extract_tables(sql: str | None) -> list[str]:
+    found: list[str] = []
+    for parts in source_tables(sql):
+        table = parts[-1].strip("`\"")
+        if table not in found:
+            found.append(table)
+    return found
+
+
+def _regex_source_names(sql: str) -> list[str]:
     source_pattern = re.compile(
         r"\b(?:FROM|JOIN)\s+((?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)"
         r"(?:\s*\.\s*(?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)){0,2})",
@@ -90,9 +136,10 @@ def extract_tables(sql: str | None) -> list[str]:
     cte_names = {name.lower() for name in cte_pattern.findall(sql)}
     found: list[str] = []
     for match in source_pattern.finditer(sql):
-        table = re.split(r"\s*\.\s*", match.group(1))[-1].strip("`\"")
-        if table.lower() not in cte_names and table not in found:
-            found.append(table)
+        name = match.group(1)
+        table = re.split(r"\s*\.\s*", name)[-1].strip("`\"")
+        if table.lower() not in cte_names and name not in found:
+            found.append(name)
     return found
 
 
@@ -163,7 +210,7 @@ def build_lineage(
                 f"{cat}.{schema}.{', '.join(tables)}",
                 "Ryze NL→SQL",
                 "Guardrails + domain-scoped read-only execution",
-                "fdryze_audit_log",
+                "Application query_history audit record",
             ],
             "medallion": [
                 {

@@ -8,6 +8,20 @@ from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 from ..schemas import PredictionPayload, UncertaintyPayload
 
 
+class ModelUnavailableError(RuntimeError):
+    pass
+
+
+def _as_model_error(exc: Exception) -> Exception:
+    text = f"{type(exc).__name__}: {exc}"
+    if any(marker in text for marker in ("LocalEntryNotFound", "huggingface", ".ckpt", "CERTIFICATE_VERIFY_FAILED")):
+        return ModelUnavailableError(
+            "The self-hosted TabPFN model weights are not available on this server (they are not in the "
+            "local model cache and could not be downloaded). No prediction was produced."
+        )
+    return exc
+
+
 class TabPFNService:
     """Run cross-validated predictions with the self-hosted TabPFN estimators.
 
@@ -58,7 +72,29 @@ class TabPFNService:
             ],
         }
 
+    def forecast(self, prepared: dict[str, Any]) -> tuple[PredictionPayload, UncertaintyPayload]:
+        """Project the next period from history: fit on past periods, predict the query row."""
+        from tabpfn import TabPFNRegressor
+
+        try:
+            model = TabPFNRegressor()
+            model.fit(prepared["X"], prepared["y"])
+            quantiles = model.predict(prepared["X_query"], output_type="quantiles", quantiles=[0.1, 0.5, 0.9])
+        except Exception as exc:
+            raise _as_model_error(exc) from exc
+        low, median, high = (float(np.asarray(values).ravel()[0]) for values in quantiles)
+        payload = PredictionPayload(type="forecast", labels=[prepared["next_period"]], values=[median])
+        return payload, UncertaintyPayload(confidence_range=[low, high])
+
     def predict(self, prepared: dict[str, Any]) -> tuple[PredictionPayload, UncertaintyPayload]:
+        try:
+            return self._predict(prepared)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise _as_model_error(exc) from exc
+
+    def _predict(self, prepared: dict[str, Any]) -> tuple[PredictionPayload, UncertaintyPayload]:
         if len(prepared["X"]) < 8:
             raise ValueError("Not enough labeled rows for a stable TabPFN prediction (minimum 8)")
         from tabpfn import TabPFNClassifier, TabPFNRegressor

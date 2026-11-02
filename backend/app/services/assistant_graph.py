@@ -59,13 +59,15 @@ class BusinessAssistantGraph:
         }
 
     def _retrieve(self, state: AssistantState) -> AssistantState:
+        # A follow-up rewritten by the planner already names its metric and period.
+        question = state.get("plan", {}).get("standalone_question") or state["question"]
         return {
             "schema_context": self.context.resolve(
-                state["question"],
+                question,
                 state["domain"],
                 include_all_tables=state.get("include_all_tables", False),
                 retrieval_text=retrieval_question(
-                    state["question"],
+                    question,
                     state.get("conversation_context"),
                 ),
             )

@@ -9,13 +9,15 @@ from fastapi import HTTPException
 
 from app.auth import AuthUser
 from app.main import user_context
-from app.models import Glossary
+from app.models import AppUser, Glossary, UserDomainGrant
 
 
 class UserContextTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite://")
         Glossary.__table__.create(self.engine)
+        AppUser.__table__.create(self.engine)
+        UserDomainGrant.__table__.create(self.engine)
         self.db = Session(self.engine)
         self.db.add_all(
             [
@@ -90,6 +92,16 @@ class UserContextTests(unittest.TestCase):
             user_context(domain="retail", db=self.db, user=AuthUser("analyst", "banking", "analyst"))
 
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_an_approved_grant_adds_the_domain_to_permitted_context(self) -> None:
+        self.db.add(AppUser(username="analyst", password_hash="x", domain="banking", display_name="A"))
+        self.db.add(UserDomainGrant(username="analyst", domain="retail", granted_by="admin"))
+        self.db.commit()
+
+        result = user_context(domain="retail", db=self.db, user=AuthUser("analyst", "banking", "analyst"))
+
+        self.assertEqual(result["user"]["permitted_domains"], ["banking", "retail"])
+        self.assertEqual([term["term"] for term in result["glossary"]], ["Retail sales"])
 
 
 if __name__ == "__main__":

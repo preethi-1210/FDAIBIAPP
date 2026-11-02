@@ -1,5 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import {
+  BarChart3,
+  LineChart as LineChartIcon,
+  PieChart as PieChartIcon,
+} from "lucide-react";
 import {
   ArcElement,
   BarElement,
@@ -13,6 +19,7 @@ import {
   Tooltip,
   type ChartData,
   type ChartOptions,
+  type Plugin,
 } from "chart.js";
 import { Bar, Doughnut, Line } from "react-chartjs-2";
 
@@ -28,14 +35,72 @@ ChartJS.register(
   Tooltip,
 );
 
-export const PALETTES: Record<string, string[]> = {
-  slate: ["#334155", "#64748b", "#94a3b8", "#0f766e", "#14b8a6"],
-  ocean: ["#123b5d", "#176b87", "#2896a5", "#56b4a9", "#a0cbb5"],
-  berry: ["#613659", "#914e72", "#c46e83", "#e49a83", "#f1c27b"],
-  citrus: ["#365b3d", "#478759", "#82a94c", "#d0aa45", "#e17c45"],
-};
+export const CHART_COLORS = [
+  "#4778F5",
+  "#39B995",
+  "#9858EA",
+  "#FF884C",
+  "#4AA6D2",
+  "#FF5D87",
+  "#8060F5",
+  "#2CBFCE",
+  "#F0B83F",
+  "#3D8CF5",
+];
 
-type Series = { label: string; value: number };
+export const REGION_CHART_COLORS = [
+  "#6C27F2",
+  "#8252F3",
+  "#9877F4",
+  "#B29CF7",
+  "#D0C2FA",
+];
+
+const ACTIVITY_BAR_COLOR = "#B29CF7";
+
+export type ChartType = "bar" | "line" | "pie";
+const CHART_TYPE_KEY = "ryze_chart_type";
+const CHART_TYPE_EVENT = "ryze-chart-type-change";
+const DEFAULT_CHART_TYPE: ChartType = "line";
+
+function isChartType(value: string | null): value is ChartType {
+  return value === "bar" || value === "line" || value === "pie";
+}
+
+export function useChartType(): [ChartType, (type: ChartType) => void] {
+  const [chartType, setCurrentChartType] = useState<ChartType>(DEFAULT_CHART_TYPE);
+
+  useEffect(() => {
+    const savedType = localStorage.getItem(CHART_TYPE_KEY);
+    if (isChartType(savedType)) setCurrentChartType(savedType);
+
+    const updateChartType = (event: Event) => {
+      const selected = (event as CustomEvent<ChartType>).detail;
+      if (isChartType(selected)) setCurrentChartType(selected);
+    };
+    const updateFromStorage = (event: StorageEvent) => {
+      if (event.key && event.key !== CHART_TYPE_KEY) return;
+      if (isChartType(event.newValue)) setCurrentChartType(event.newValue);
+    };
+
+    window.addEventListener(CHART_TYPE_EVENT, updateChartType);
+    window.addEventListener("storage", updateFromStorage);
+    return () => {
+      window.removeEventListener(CHART_TYPE_EVENT, updateChartType);
+      window.removeEventListener("storage", updateFromStorage);
+    };
+  }, []);
+
+  function setChartType(type: ChartType) {
+    setCurrentChartType(type);
+    localStorage.setItem(CHART_TYPE_KEY, type);
+    window.dispatchEvent(new CustomEvent(CHART_TYPE_EVENT, { detail: type }));
+  }
+
+  return [chartType, setChartType];
+}
+
+type Series = { label: string; value: number | null };
 
 const axisColor = "#8292a5";
 
@@ -61,7 +126,7 @@ const axisOptions = {
 } satisfies ChartOptions<"bar">["scales"];
 
 function formatValue(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
 }
 
 function commonOptions<TType extends "bar" | "line" | "doughnut">(
@@ -86,32 +151,32 @@ function commonOptions<TType extends "bar" | "line" | "doughnut">(
   } as ChartOptions<TType>;
 }
 
-export function PalettePicker({
+export function ChartTypePicker({
   value,
   onChange,
 }: {
-  value: string;
-  onChange: (name: string) => void;
+  value: ChartType;
+  onChange: (type: ChartType) => void;
 }) {
+  const chartTypes: { type: ChartType; label: string; icon: typeof BarChart3 }[] = [
+    { type: "bar", label: "Bar chart", icon: BarChart3 },
+    { type: "line", label: "Line chart", icon: LineChartIcon },
+    { type: "pie", label: "Pie chart", icon: PieChartIcon },
+  ];
+
   return (
-    <div className="palette-picker" role="group" aria-label="Chart color palette">
-      <span className="palette-picker__label">Palette</span>
-      {Object.entries(PALETTES).map(([name, colors]) => (
+    <div className="chart-type-picker" role="group" aria-label="Chart type">
+      {chartTypes.map(({ type, label, icon: Icon }) => (
         <button
-          key={name}
-          className={`palette-option${value === name ? " palette-option--active" : ""}`}
+          key={type}
           type="button"
-          onClick={() => onChange(name)}
-          aria-label={`Use ${name} palette`}
-          aria-pressed={value === name}
-          title={`${name[0].toUpperCase()}${name.slice(1)}`}
+          className={`chart-type-picker__button${value === type ? " chart-type-picker__button--active" : ""}`}
+          aria-label={`Use ${label.toLowerCase()}`}
+          aria-pressed={value === type}
+          title={label}
+          onClick={() => onChange(type)}
         >
-          <span className="palette-option__swatches" aria-hidden="true">
-            {colors.slice(0, 4).map((color) => (
-              <span key={color} style={{ backgroundColor: color }} />
-            ))}
-          </span>
-          <span className="palette-option__name">{name}</span>
+          <Icon size={15} aria-hidden="true" />
         </button>
       ))}
     </div>
@@ -122,12 +187,38 @@ export function BarList({
   data,
   colors,
   formatValue: formatAxisValue = formatValue,
+  showValues = false,
 }: {
   data: Series[];
   colors: string[];
   formatValue?: (value: number) => string;
+  showValues?: boolean;
 }) {
   if (!data.length) return <EmptyChart />;
+  const valueLabels: Plugin<"bar"> = {
+    id: "barEndValues",
+    afterDatasetsDraw(chart) {
+      if (!showValues) return;
+      const context = chart.ctx;
+      const dataset = chart.data.datasets[0];
+      if (!dataset) return;
+      context.save();
+      context.fillStyle = "#51607a";
+      context.font = "600 10px Inter, system-ui, sans-serif";
+      context.textAlign = "left";
+      context.textBaseline = "middle";
+      chart.getDatasetMeta(0).data.forEach((element, index) => {
+        const raw = dataset.data[index];
+        if (typeof raw !== "number" || !Number.isFinite(raw)) return;
+        const text = formatAxisValue(raw);
+        const bar = element.getProps(["x", "y"], true);
+        const textWidth = context.measureText(text).width;
+        const x = Math.min(bar.x + 7, chart.chartArea.right - textWidth - 2);
+        context.fillText(text, x, bar.y);
+      });
+      context.restore();
+    },
+  };
   return (
     <div className="chart-frame chart-frame--bars">
       <Bar
@@ -143,8 +234,10 @@ export function BarList({
             },
           ],
         }}
+        plugins={[valueLabels]}
         options={commonOptions<"bar">({
           indexAxis: "y",
+          layout: { padding: { right: showValues ? 42 : 2 } },
           scales: {
             x: {
               ...axisOptions.y,
@@ -167,8 +260,76 @@ export function BarList({
   );
 }
 
-export function LineChart({ data, colors }: { data: Series[]; colors: string[] }) {
+export function ComparisonBarChart({
+  data,
+  colors,
+  currentLabel = "Current period",
+  comparisonLabel = "Comparison period",
+}: {
+  data: { label: string; value: number; comparison_value: number }[];
+  colors: string[];
+  currentLabel?: string;
+  comparisonLabel?: string;
+}) {
   if (!data.length) return <EmptyChart />;
+  return (
+    <div className="chart-frame chart-frame--bars">
+      <Bar
+        data={{
+          labels: data.map((row) => row.label),
+          datasets: [
+            {
+              label: currentLabel,
+              data: data.map((row) => row.value),
+              backgroundColor: colors[0],
+              borderRadius: 5,
+              borderSkipped: false,
+              maxBarThickness: 22,
+            },
+            {
+              label: comparisonLabel,
+              data: data.map((row) => row.comparison_value),
+              backgroundColor: colors[2] || colors[1],
+              borderRadius: 5,
+              borderSkipped: false,
+              maxBarThickness: 22,
+            },
+          ],
+        }}
+        options={commonOptions<"bar">({
+          indexAxis: "y",
+          scales: {
+            x: {
+              ...axisOptions.y,
+              ticks: {
+                ...axisOptions.y.ticks,
+                callback: (value) => formatValue(Number(value)),
+              },
+            },
+            y: { ...axisOptions.x, grid: { display: false } },
+          },
+          plugins: {
+            legend: { display: true, position: "bottom", labels: { boxWidth: 9, boxHeight: 9, usePointStyle: true } },
+            tooltip: {
+              callbacks: { label: (context) => ` ${context.dataset.label}: ${formatValue(Number(context.parsed.x))}` },
+            },
+          },
+        })}
+      />
+    </div>
+  );
+}
+
+export function LineChart({
+  data,
+  colors,
+  label = "Volume",
+}: {
+  data: Series[];
+  colors: string[];
+  label?: string;
+}) {
+  if (!data.some((row) => row.value !== null)) return <EmptyChart />;
   return (
     <div className="chart-frame">
       <Line
@@ -176,11 +337,11 @@ export function LineChart({ data, colors }: { data: Series[]; colors: string[] }
           labels: data.map((row) => row.label),
           datasets: [
             {
-              label: "Volume",
+              label,
               data: data.map((row) => row.value),
               borderColor: colors[1] || colors[0],
-              backgroundColor: `${colors[2] || colors[0]}35`,
-              pointBackgroundColor: colors[0],
+              backgroundColor: "#39B99524",
+              pointBackgroundColor: colors[1] || colors[0],
               pointBorderColor: "#fff",
               pointBorderWidth: 2,
               pointRadius: 4,
@@ -188,6 +349,7 @@ export function LineChart({ data, colors }: { data: Series[]; colors: string[] }
               borderWidth: 2.5,
               tension: 0.36,
               fill: true,
+              spanGaps: false,
             },
           ],
         }}
@@ -206,15 +368,33 @@ export function LineChart({ data, colors }: { data: Series[]; colors: string[] }
   );
 }
 
-export function PieChart({ data, colors }: { data: Series[]; colors: string[] }) {
-  const total = data.reduce((sum, row) => sum + row.value, 0);
-  if (!data.length || total <= 0) return <EmptyChart />;
+export function PieChart({
+  data,
+  colors,
+  showLegend = true,
+  centerLabel = "Total",
+}: {
+  data: Series[];
+  colors: string[];
+  showLegend?: boolean;
+  centerLabel?: string;
+}) {
+  const availableData = data.filter((row): row is { label: string; value: number } =>
+    typeof row.value === "number" && Number.isFinite(row.value),
+  );
+  const total = availableData.reduce((sum, row) => sum + row.value, 0);
+  if (!availableData.length || total <= 0) return <EmptyChart />;
+  const formattedTotal = formatValue(total);
+  const centerValue = formattedTotal.length > 12
+    ? new Intl.NumberFormat(undefined, { notation: "compact", maximumSignificantDigits: 4 }).format(total)
+    : formattedTotal;
+  const centerFontSize = Math.max(9, Math.min(20, 118 / (centerValue.length * 0.58)));
   const chartData: ChartData<"doughnut", number[], string> = {
-    labels: data.map((row) => row.label),
+    labels: availableData.map((row) => row.label),
     datasets: [
       {
-        data: data.map((row) => row.value),
-        backgroundColor: data.map((_, index) => colors[index % colors.length]),
+        data: availableData.map((row) => row.value),
+        backgroundColor: availableData.map((_, index) => colors[index % colors.length]),
         borderColor: "#fff",
         borderWidth: 3,
         hoverOffset: 7,
@@ -227,8 +407,10 @@ export function PieChart({ data, colors }: { data: Series[]; colors: string[] })
       <div className="chart-frame chart-frame--doughnut">
         <Doughnut
           data={chartData}
+          plugins={[doughnutPercentageLabels]}
           options={commonOptions<"doughnut">({
             cutout: "70%",
+            layout: { padding: 10 },
             plugins: {
               legend: { display: false },
               tooltip: {
@@ -243,19 +425,99 @@ export function PieChart({ data, colors }: { data: Series[]; colors: string[] })
           })}
         />
         <div className="doughnut-center">
-          <strong>{formatValue(total)}</strong>
-          <span>Total</span>
+          <strong style={{ fontSize: `${centerFontSize}px` }} title={`Exact total: ${formattedTotal}`} aria-label={`Total ${formattedTotal}`}>
+            {centerValue}
+          </strong>
+          <span>{centerLabel}</span>
         </div>
       </div>
-      <div className="chart-legend">
-        {data.map((row, index) => (
-          <div className="chart-legend__item" key={row.label}>
-            <span className="chart-legend__dot" style={{ backgroundColor: colors[index % colors.length] }} />
-            <span className="chart-legend__label">{row.label}</span>
-            <strong>{((row.value / total) * 100).toFixed(1)}%</strong>
-          </div>
-        ))}
-      </div>
+      {showLegend ? (
+        <div className="chart-legend">
+          {availableData.map((row, index) => (
+            <div className="chart-legend__item" key={row.label}>
+              <span className="chart-legend__dot" style={{ backgroundColor: colors[index % colors.length] }} />
+              <span className="chart-legend__label">{row.label}</span>
+              <strong>{((row.value / total) * 100).toFixed(1)}%</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const doughnutPercentageLabels: Plugin<"doughnut"> = {
+  id: "doughnutPercentageLabels",
+  afterDatasetDraw(chart, args) {
+    const values = chart.data.datasets[args.index]?.data;
+    const arcs = chart.getDatasetMeta(args.index).data;
+    if (!values) return;
+    const context = chart.ctx;
+    context.save();
+    context.fillStyle = "#fff";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    const chartArea = chart.chartArea;
+    arcs.forEach((element, index) => {
+      const value = Number(values[index]);
+      const total = values.reduce<number>((sum, item) => sum + Number(item || 0), 0);
+      if (!total || value / total < 0.045) return;
+      const arc = element.getProps(["x", "y", "startAngle", "endAngle", "innerRadius", "outerRadius"], true);
+      const angle = (arc.startAngle + arc.endAngle) / 2;
+      const label = `${((value / total) * 100).toFixed(1)}%`;
+      const fontSize = 9;
+      context.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+      const radius = arc.innerRadius + (arc.outerRadius - arc.innerRadius) * 0.55;
+      const x = arc.x + Math.cos(angle) * radius;
+      const y = arc.y + Math.sin(angle) * radius;
+      const labelWidth = context.measureText(label).width;
+      const segmentWidth = Math.abs(arc.endAngle - arc.startAngle) * radius;
+      if (
+        segmentWidth < labelWidth + 5 ||
+        x - labelWidth / 2 < chartArea.left + 2 ||
+        x + labelWidth / 2 > chartArea.right - 2 ||
+        y - fontSize / 2 < chartArea.top + 2 ||
+        y + fontSize / 2 > chartArea.bottom - 2
+      ) return;
+      context.fillText(label, x, y);
+    });
+    context.restore();
+  },
+};
+
+export function ActivityBarChart({ data }: { data: Series[] }) {
+  if (!data.some((row) => row.value !== null)) return <EmptyChart />;
+  return (
+    <div className="chart-frame">
+      <Bar
+        data={{
+          labels: data.map((row) => row.label),
+          datasets: [{
+            label: "Events",
+            data: data.map((row) => row.value),
+            backgroundColor: ACTIVITY_BAR_COLOR,
+            borderRadius: 5,
+            borderSkipped: false,
+            maxBarThickness: 34,
+          }],
+        }}
+        options={commonOptions<"bar">({
+          scales: {
+            x: {
+              ...axisOptions.x,
+              grid: { display: false },
+              ticks: { ...axisOptions.x.ticks, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+            },
+            y: axisOptions.y,
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: { label: (context) => ` ${formatValue(Number(context.parsed.y))} events` },
+            },
+          },
+        })}
+      />
     </div>
   );
 }
@@ -273,6 +535,22 @@ export function AutoChart({
   return <BarList data={spec.data} colors={colors} />;
 }
 
+export function DynamicChart({
+  type,
+  data,
+  colors,
+  formatValue,
+}: {
+  type: ChartType;
+  data: Series[];
+  colors: string[];
+  formatValue?: (value: number) => string;
+}) {
+  if (type === "pie") return <PieChart data={data} colors={colors} />;
+  if (type === "bar") return <BarList data={data} colors={colors} formatValue={formatValue} />;
+  return <LineChart data={data} colors={colors} />;
+}
+
 function EmptyChart() {
-  return <div className="chart-empty">No chartable data is available for this view.</div>;
+  return <div className="chart-empty">No data available for the selected period.</div>;
 }

@@ -1,8 +1,9 @@
-DOMAINS = ("banking", "finance", "insurance", "retail")
+DOMAINS = ("banking", "finance", "healthcare", "insurance", "retail")
 
 DOMAIN_LABELS = {
     "banking": "Banking",
     "finance": "Finance",
+    "healthcare": "Healthcare",
     "insurance": "Insurance",
     "retail": "Retail",
 }
@@ -11,6 +12,7 @@ DEMO_USERS = [
     {"username": "admin", "password": "ryze123", "domain": "all", "display_name": "Platform Admin"},
     {"username": "bank.user", "password": "banking123", "domain": "banking", "display_name": "Banking Analyst"},
     {"username": "fin.user", "password": "finance123", "domain": "finance", "display_name": "Finance Analyst"},
+    {"username": "health.user", "password": "healthcare123", "domain": "healthcare", "display_name": "Healthcare Analyst"},
     {"username": "ins.user", "password": "insurance123", "domain": "insurance", "display_name": "Insurance Analyst"},
     {"username": "ret.user", "password": "retail123", "domain": "retail", "display_name": "Retail Analyst"},
 ]
@@ -47,6 +49,14 @@ PROMPTS = {
         "Which policyholders are likely to churn next month?",
         "Break down premium by segment",
         "Forecast next month claim severity",
+    ],
+    "healthcare": [
+        "How many synthetic patients are enrolled by region?",
+        "Show encounter volume by month",
+        "What is the encounter cancellation rate?",
+        "Summarize approved claim amounts by facility region",
+        "Show quality metrics by reporting period",
+        "Which diagnosis categories are most common?",
     ],
 }
 

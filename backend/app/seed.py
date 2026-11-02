@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine
-from .domains import DEMO_USERS, DOMAINS
+from .domains import DEMO_USERS
 from .models import (
     AppUser,
     BankAccount,
@@ -15,11 +15,20 @@ from .models import (
     Claim,
     Customer,
     Glossary,
+    HealthcareClaim,
+    HealthcareDiagnosis,
+    HealthcareEncounter,
+    HealthcareFacility,
+    HealthcarePatient,
+    HealthcareProcedure,
+    HealthcareProvider,
+    HealthcareQualityMetric,
     HitlReview,
     LiveEvent,
     Order,
     OrderItem,
     Product,
+    UserDomainTenant,
 )
 from .security import hash_password
 
@@ -90,29 +99,51 @@ GLOSSARY = {
         ("policy", "products", "name", "Insurance product"),
         ("churn", "customers", "churned", "1 if the policyholder churned"),
     ],
+    "healthcare": [
+        ("patient", "healthcare_patients", "patient_key", "Synthetic tenant-scoped patient key"),
+        ("encounter", "healthcare_encounters", "encounter_key", "Synthetic care encounter"),
+        ("diagnosis", "healthcare_diagnoses", "diagnosis_category", "Synthetic diagnosis category"),
+        ("procedure", "healthcare_procedures", "procedure_category", "Synthetic procedure category"),
+        ("claim", "healthcare_claims", "claim_amount", "Synthetic claim amount"),
+        ("approved amount", "healthcare_claims", "approved_amount", "Synthetic approved claim amount"),
+        ("provider", "healthcare_providers", "provider_specialty", "Synthetic provider specialty"),
+        ("facility", "healthcare_facilities", "facility_region", "Synthetic facility region"),
+        ("quality metric", "healthcare_quality_metrics", "metric_value", "Synthetic facility quality metric"),
+    ],
 }
 
 
 def ensure_schema() -> None:
     inspector = inspect(engine)
     tables = inspector.get_table_names()
-    needs_reset = False
     if "customers" in tables:
         cols = {c["name"] for c in inspector.get_columns("customers")}
         if "domain" not in cols:
-            needs_reset = True
-    if "app_users" not in tables and tables:
-        needs_reset = True
-    if needs_reset:
-        Base.metadata.drop_all(bind=engine)
+            raise RuntimeError(
+                "The existing customers table uses a legacy schema without a domain column. "
+                "Automatic migration is not safe and no data was changed; back up and migrate it explicitly."
+            )
     Base.metadata.create_all(bind=engine)
     _add_column_if_missing("query_history", "audit_id", "VARCHAR(40)")
     _add_column_if_missing("query_history", "tables_used", "VARCHAR(240)")
     _add_column_if_missing("query_history", "row_count", "INTEGER DEFAULT 0")
     _add_column_if_missing("query_history", "guardrail_ok", "INTEGER DEFAULT 1")
     _add_column_if_missing("query_history", "result_json", "TEXT")
+    _add_column_if_missing("query_history", "tenant_id", "VARCHAR(64)")
+    _add_column_if_missing("conversations", "tenant_id", "VARCHAR(64)")
+    _add_column_if_missing("hitl_reviews", "tenant_id", "VARCHAR(64)")
     _add_column_if_missing("customers", "account_number", "VARCHAR(40)")
     _add_column_if_missing("claims", "policy_number", "VARCHAR(40)")
+    _add_column_if_missing("domain_access_requests", "decision_seen", "INTEGER DEFAULT 0")
+    _add_column_if_missing("hitl_reviews", "conversation_id", "VARCHAR(36)")
+    _add_column_if_missing("hitl_reviews", "reviewed_by", "VARCHAR(80)")
+    _add_column_if_missing("hitl_reviews", "reviewed_at", "TIMESTAMP")
+    _add_column_if_missing("hitl_reviews", "decision_note", "TEXT")
+    _add_column_if_missing("hitl_reviews", "completed_at", "TIMESTAMP")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_query_history_tenant_id ON query_history (tenant_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_conversations_tenant_id ON conversations (tenant_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_hitl_reviews_tenant_id ON hitl_reviews (tenant_id)"))
 
 
 def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
@@ -127,21 +158,26 @@ def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
 
 
 def seed_if_empty(db: Session) -> None:
-    if db.query(AppUser).count() > 0 and db.query(Customer).count() > 0:
-        if settings.demo_mode:
-            _seed_demo_sensitive_identifiers(db)
-            _seed_banking_demo_data(db)
+    if not settings.demo_mode:
+        return
+    existing_usernames = {username for (username,) in db.query(AppUser.username).all()}
+    for user in DEMO_USERS:
+        if user["username"] not in existing_usernames:
+            db.add(
+                AppUser(
+                    username=user["username"],
+                    password_hash=hash_password(user["password"]),
+                    domain=user["domain"],
+                    display_name=user["display_name"],
+                )
+            )
+    db.flush()
+    if db.query(Customer).count() > 0:
+        _seed_demo_sensitive_identifiers(db)
+        _seed_banking_demo_data(db)
+        _seed_demo_healthcare(db)
         return
     rng = Random(42)
-    for user in DEMO_USERS:
-        db.add(
-            AppUser(
-                username=user["username"],
-                password_hash=hash_password(user["password"]),
-                domain=user["domain"],
-                display_name=user["display_name"],
-            )
-        )
 
     n_customers = settings.seed_customers_per_domain
     regions = ["North", "South", "East", "West"]
@@ -161,7 +197,7 @@ def seed_if_empty(db: Session) -> None:
     order_id = 1
     item_id = 1
     claim_id = 1
-    for domain in DOMAINS:
+    for domain in PRODUCTS:
         customers = []
         for i in range(1, n_customers + 1):
             churned = 1 if rng.random() > 0.82 else 0
@@ -246,6 +282,7 @@ def seed_if_empty(db: Session) -> None:
     db.commit()
     if settings.demo_mode:
         _seed_banking_demo_data(db)
+        _seed_demo_healthcare(db)
 
 
 def _seed_banking_demo_data(db: Session) -> None:
@@ -345,6 +382,168 @@ def _seed_demo_sensitive_identifiers(db: Session) -> None:
         claim.policy_number = f"DEMO-POL-INS-{claim.customer_id:05d}"
     if customers or claims:
         db.commit()
+
+
+def _seed_demo_healthcare(db: Session) -> None:
+    tenant_id = "demo-healthcare"
+    usernames = {username for (username,) in db.query(AppUser.username).all()}
+    existing_assignments = {
+        username
+        for (username,) in db.query(UserDomainTenant.username)
+        .filter(UserDomainTenant.domain == "healthcare")
+        .all()
+    }
+    db.add_all(
+        UserDomainTenant(username=username, domain="healthcare", tenant_id=tenant_id)
+        for username in ("admin", "health.user")
+        if username in usernames and username not in existing_assignments
+    )
+    existing_terms = {
+        term
+        for (term,) in db.query(Glossary.business_term)
+        .filter(Glossary.domain == "healthcare")
+        .all()
+    }
+    db.add_all(
+        Glossary(domain="healthcare", business_term=term, table_name=table, column_name=column, description=description)
+        for term, table, column, description in GLOSSARY["healthcare"]
+        if term not in existing_terms
+    )
+    if db.query(HealthcarePatient).filter(HealthcarePatient.tenant_id == tenant_id).first():
+        db.commit()
+        return
+
+    rng = Random(164)
+    regions = ("North", "South", "East", "West")
+    facilities = [
+        HealthcareFacility(
+            tenant_id=tenant_id,
+            facility_key=f"DEMO-FAC-{index:03d}",
+            facility_type=facility_type,
+            facility_region=region,
+        )
+        for index, (facility_type, region) in enumerate(
+            zip(("hospital", "clinic", "urgent care", "hospital"), regions),
+            start=1,
+        )
+    ]
+    db.add_all(facilities)
+    providers = [
+        HealthcareProvider(
+            tenant_id=tenant_id,
+            provider_key=f"DEMO-PROV-{index:04d}",
+            provider_specialty=rng.choice(("primary care", "cardiology", "orthopedics", "pediatrics")),
+            facility_key=facilities[(index - 1) % len(facilities)].facility_key,
+            provider_region=facilities[(index - 1) % len(facilities)].facility_region,
+        )
+        for index in range(1, 13)
+    ]
+    db.add_all(providers)
+    patient_count = max(40, min(settings.seed_customers_per_domain, 250))
+    patients = [
+        HealthcarePatient(
+            tenant_id=tenant_id,
+            patient_key=f"DEMO-PAT-{index:05d}",
+            age_band=rng.choice(("0-17", "18-34", "35-49", "50-64", "65+")),
+            sex=rng.choice(("female", "male", "unspecified")),
+            postal_region=rng.choice(regions),
+            enrollment_date=date.today() - timedelta(days=rng.randint(1, 900)),
+            patient_status=rng.choice(("active", "active", "inactive")),
+        )
+        for index in range(1, patient_count + 1)
+    ]
+    db.add_all(patients)
+    db.flush()
+
+    encounters: list[HealthcareEncounter] = []
+    diagnoses: list[HealthcareDiagnosis] = []
+    procedures: list[HealthcareProcedure] = []
+    claims: list[HealthcareClaim] = []
+    for patient_index, patient in enumerate(patients, start=1):
+        for encounter_index in range(rng.randint(1, 4)):
+            ordinal = len(encounters) + 1
+            facility = facilities[(patient_index + encounter_index) % len(facilities)]
+            provider = providers[(patient_index + encounter_index) % len(providers)]
+            encounter = HealthcareEncounter(
+                tenant_id=tenant_id,
+                encounter_key=f"DEMO-ENC-{ordinal:06d}",
+                patient_key=patient.patient_key,
+                provider_key=provider.provider_key,
+                facility_key=facility.facility_key,
+                encounter_date=date.today() - timedelta(days=rng.randint(1, 365)),
+                encounter_type=rng.choice(("outpatient", "inpatient", "urgent care", "telehealth")),
+                encounter_status=rng.choice(("completed", "completed", "cancelled")),
+            )
+            encounters.append(encounter)
+            if rng.random() < 0.8:
+                diagnoses.append(
+                    HealthcareDiagnosis(
+                        tenant_id=tenant_id,
+                        diagnosis_key=f"DEMO-DX-{len(diagnoses) + 1:06d}",
+                        encounter_key=encounter.encounter_key,
+                        diagnosis_code=f"SYN-{rng.randint(100, 999)}",
+                        diagnosis_category=rng.choice(("preventive", "cardiovascular", "respiratory", "musculoskeletal")),
+                        diagnosis_date=encounter.encounter_date,
+                    )
+                )
+            if rng.random() < 0.45:
+                procedures.append(
+                    HealthcareProcedure(
+                        tenant_id=tenant_id,
+                        procedure_key=f"DEMO-PR-{len(procedures) + 1:06d}",
+                        encounter_key=encounter.encounter_key,
+                        procedure_code=f"SYN-{rng.randint(100, 999)}",
+                        procedure_category=rng.choice(("imaging", "laboratory", "therapy", "screening")),
+                        procedure_date=encounter.encounter_date,
+                    )
+                )
+            if rng.random() < 0.85:
+                claim_amount = round(rng.uniform(75, 4200), 2)
+                claim_status = rng.choice(("approved", "approved", "pending", "denied"))
+                claims.append(
+                    HealthcareClaim(
+                        tenant_id=tenant_id,
+                        claim_key=f"DEMO-CLM-{len(claims) + 1:06d}",
+                        encounter_key=encounter.encounter_key,
+                        service_date=encounter.encounter_date,
+                        claim_amount=claim_amount,
+                        approved_amount=round(claim_amount * rng.uniform(0.45, 1), 2)
+                        if claim_status == "approved"
+                        else 0,
+                        claim_status=claim_status,
+                        payer_key=f"DEMO-PAYER-{rng.randint(1, 4):02d}",
+                    )
+                )
+ 
+    # Insert parent encounters before dependent records.
+    db.add_all(encounters)
+    db.flush()
+
+    # Insert child records after their parent encounters exist.
+    db.add_all(diagnoses)
+    db.add_all(procedures)
+    db.add_all(claims)
+    db.add_all(
+        HealthcareQualityMetric(
+            tenant_id=tenant_id,
+            metric_key=f"DEMO-QM-{index:05d}",
+            facility_key=facility.facility_key,
+            metric_date=date.today() - timedelta(days=30 * period),
+            metric_name=metric_name,
+            metric_value=round(rng.uniform(0.72, 0.99), 3),
+            reporting_period=f"{date.today().year}-{date.today().month:02d}",
+        )
+        for index, (facility, metric_name, period) in enumerate(
+            (
+                (facility, metric, period)
+                for facility in facilities
+                for metric in ("follow-up within 7 days", "preventive screening completion")
+                for period in range(1, 7)
+            ),
+            start=1,
+        )
+    )
+    db.commit()
 
 
 def apply_postgres_routines(db: Session) -> None:

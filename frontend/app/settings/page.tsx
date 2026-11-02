@@ -62,10 +62,6 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    if (!localStorage.getItem("ryze_token")) {
-      window.location.href = "/login";
-      return;
-    }
     void refresh();
   }, [refresh]);
 

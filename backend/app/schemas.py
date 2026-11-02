@@ -17,6 +17,37 @@ class SignupRequest(BaseModel):
     domain: str = Field(pattern=r"^(banking|finance|insurance|retail)$")
 
 
+class OidcOnboardingRequest(BaseModel):
+    # "all" (administrator) is deliberately not accepted here.
+    domain: str = Field(pattern=r"^(banking|finance|healthcare|insurance|retail)$")
+
+
+_BUSINESS_DOMAIN = r"^(banking|finance|healthcare|insurance|retail)$"
+
+
+class DomainAccessRequestCreate(BaseModel):
+    domain: str = Field(pattern=_BUSINESS_DOMAIN)
+    reason: str = Field(min_length=10, max_length=500)
+
+
+class AccessDecision(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class DomainGrantCreate(BaseModel):
+    domain: str = Field(pattern=_BUSINESS_DOMAIN)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class RoleUpdate(BaseModel):
+    role: str = Field(pattern=r"^(admin|analyst)$")
+    primary_domain: Optional[str] = Field(default=None, pattern=_BUSINESS_DOMAIN)
+
+
+class SwitchDomainRequest(BaseModel):
+    domain: str = Field(pattern=_BUSINESS_DOMAIN)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -31,7 +62,7 @@ class QueryRequest(BaseModel):
     conversation_id: UUID | None = None
     llm_provider: Optional[str] = Field(
         default=None,
-        pattern="^(auto|openai|grok|xai|anthropic|ollama)$",
+        pattern="^(auto|google|openai|grok|xai|anthropic|ollama)$",
     )
 
 
@@ -65,3 +96,71 @@ class QueryResponse(BaseModel):
     hitl: Optional[dict[str, Any]] = None
     model_gov: Optional[dict[str, Any]] = None
     conversation_id: UUID | None = None
+    # complete | no_data | insufficient_data | needs_clarification | awaiting_review | error
+    status: str = "complete"
+    # Which engine actually handled each stage (planner, SQL, execution, prediction, synthesis).
+    trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ReportPeriod(BaseModel):
+    start: str
+    end: str
+    comparison_start: str
+    comparison_end: str
+    label: str
+    comparison_label: str
+
+
+class ReportAvailability(BaseModel):
+    start: str | None
+    end: str | None
+
+
+class ReportTrendPoint(BaseModel):
+    label: str
+    value: float | None
+    comparison_value: float | None
+
+
+class ReportMetric(BaseModel):
+    key: str
+    label: str
+    current: float | None
+    comparison: float | None
+    unit: str
+    definition: str
+    change_percent: float | None
+    higher_is_better: bool | None
+    trend: list[ReportTrendPoint] = Field(default_factory=list)
+
+
+class ReportBreakdown(BaseModel):
+    label: str
+    value: float
+
+
+class ReportRow(BaseModel):
+    period: str
+    category: str
+    region: str
+    metric: str
+    value: float
+
+
+class ReportFilterOptions(BaseModel):
+    categories: list[str]
+    regions: list[str]
+
+
+class ReportResponse(BaseModel):
+    domain: str
+    domain_label: str
+    period: ReportPeriod
+    availability: ReportAvailability
+    metrics: list[ReportMetric]
+    trend: list[ReportTrendPoint]
+    categories: list[ReportBreakdown]
+    regions: list[ReportBreakdown]
+    rows: list[ReportRow]
+    filter_options: ReportFilterOptions
+    updated_at: str

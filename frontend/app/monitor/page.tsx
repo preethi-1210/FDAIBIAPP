@@ -42,10 +42,6 @@ export default function MonitorPage() {
   }, [period]);
 
   useEffect(() => {
-    if (!localStorage.getItem("ryze_token")) {
-      window.location.href = "/login";
-      return;
-    }
     void load();
   }, [load]);
 

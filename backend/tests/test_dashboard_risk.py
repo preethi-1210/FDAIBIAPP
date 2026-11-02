@@ -12,10 +12,11 @@ class DashboardRiskRatioTests(unittest.TestCase):
     def test_each_domain_has_explicit_ratio_definition(self) -> None:
         self.assertEqual(
             set(RISK_RATIO_DEFINITIONS),
-            {"banking", "finance", "insurance", "retail"},
+            {"banking", "finance", "healthcare", "insurance", "retail"},
         )
         self.assertIn("demo proxy", RISK_RATIO_DEFINITIONS["finance"]["description"])
         self.assertIn("demo proxy", RISK_RATIO_DEFINITIONS["retail"]["description"])
+        self.assertIn("tenant", RISK_RATIO_DEFINITIONS["healthcare"]["description"])
 
     def test_each_domain_query_is_read_only_scoped_and_sql_guardrail_compatible(self) -> None:
         for domain in RISK_RATIO_DEFINITIONS:

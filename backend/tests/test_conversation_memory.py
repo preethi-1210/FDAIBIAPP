@@ -74,6 +74,30 @@ class ConversationMemoryTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    def test_healthcare_conversation_cannot_be_reused_after_tenant_reassignment(self) -> None:
+        conversation_id = uuid4()
+        self.db.add(
+            Conversation(
+                id=str(conversation_id),
+                username="analyst",
+                domain="healthcare",
+                tenant_id="tenant-a",
+                title="Patient aggregate",
+            )
+        )
+        self.db.commit()
+        healthcare_user = AuthUser(
+            username="analyst",
+            domain="healthcare",
+            role="analyst",
+            tenant_id="tenant-b",
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            _get_conversation_context(self.db, healthcare_user, conversation_id, "ignored")
+
+        self.assertEqual(raised.exception.status_code, 404)
+
     def test_new_conversation_is_scoped_to_the_authenticated_domain(self) -> None:
         conversation_id = uuid4()
 

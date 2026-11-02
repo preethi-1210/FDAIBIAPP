@@ -56,10 +56,6 @@ export default function ContextIntelligencePage() {
   }
 
   useEffect(() => {
-    if (!localStorage.getItem("ryze_token")) {
-      window.location.href = "/login";
-      return;
-    }
     void loadContext();
   }, []);
 
@@ -106,7 +102,9 @@ export default function ContextIntelligencePage() {
                 <p className="mt-1 text-sm font-semibold text-slate-800">{context.user.username} · {context.user.role}</p>
               </div>
               <div>
-                <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Active source</p>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                  Active source
+                </p>
                 <p className="mt-1 text-sm font-semibold text-slate-800">
                   {context.source.warehouse}{context.source.catalog ? ` · ${context.source.catalog}` : ""}
                   {context.source.schema ? ` · ${context.source.schema}` : ""}

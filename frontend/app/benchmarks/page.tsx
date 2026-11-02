@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AlertCircle, CheckCircle2, Database, LoaderCircle, Play, ShieldCheck } from "lucide-react";
 import { Shell } from "@/components/Shell";
 import { api } from "@/lib/api";
@@ -22,11 +22,6 @@ export default function BenchmarksPage() {
   const [verification, setVerification] = useState<WarehouseVerification | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!localStorage.getItem("ryze_token")) window.location.href = "/login";
-  }, []);
-
   async function runVerification() {
     setLoading(true);
     setError("");

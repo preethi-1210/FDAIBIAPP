@@ -39,7 +39,7 @@ export type BusinessContext = {
 const LEVELS = [
   { title: "Data sources", icon: Database },
   { title: "Business semantics", icon: Network },
-  { title: "Context intelligence", icon: BrainCircuit },
+  { title: "Foresight", icon: BrainCircuit },
   { title: "User & organization", icon: LockKeyhole },
   { title: "AI analytics engine", icon: Activity },
   { title: "Insights & evidence", icon: Sparkles },
@@ -49,6 +49,7 @@ const SAMPLE_CONCEPTS: Record<string, string[]> = {
   banking: ["Accounts", "Transactions", "Branches"],
   finance: ["Financial accounts", "Budgets", "Revenue"],
   insurance: ["Policies", "Claims", "Premiums"],
+  healthcare: ["Patients", "Encounters", "Claims", "Quality metrics"],
   retail: ["Orders", "Products", "Stores"],
 };
 

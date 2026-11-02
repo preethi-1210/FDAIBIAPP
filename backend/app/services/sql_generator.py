@@ -1,14 +1,101 @@
+import logging
 import re
 from typing import Any
 
 from ..config import settings
-from ..llm import complete_json, resolve_provider
+from ..llm import complete_json, failed_providers, last_failure, record_step, resolve_provider
 from ..sensitive_data import requested_sensitive_type, sensitive_field_candidates
 from .conversation_context import format_conversation_context
 
 
 def _is_postgres() -> bool:
     return settings.warehouse != "databricks" and settings.database_url.startswith("postgresql")
+
+
+def _generate_databricks_domain_prompt(
+    question: str,
+    schema_ctx: dict[str, Any],
+    domain: str,
+    is_prediction: bool,
+) -> str | None:
+    if is_prediction:
+        return None
+
+    tables = {
+        str(table).lower(): {
+            str(column.get("name", "")).lower()
+            for column in columns
+        }
+        for table, columns in schema_ctx.get("tables", {}).items()
+    }
+    q = question.lower()
+
+    def has_columns(table: str, *columns: str) -> bool:
+        return table in tables and set(columns).issubset(tables[table])
+
+    if (
+        domain == "banking"
+        and any(term in q for term in ("transaction", "transactions"))
+        and "last week" in q
+        and has_columns("agg_transactions_daily", "_gold_date", "record_count", "total_amount")
+    ):
+        return """
+            SELECT COALESCE(SUM(record_count), 0) AS transaction_count,
+                   COALESCE(SUM(total_amount), 0) AS transaction_volume
+            FROM agg_transactions_daily
+            WHERE _gold_date >= DATE_SUB(
+                CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE), 7)
+              AND _gold_date < CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)
+        """.strip()
+
+    if (
+        domain == "finance"
+        and "account" in q
+        and "balance" in q
+        and "month" in q
+        and has_columns("agg_accounts_monthly", "_gold_month", "total_balance", "record_count")
+    ):
+        return """
+            SELECT _gold_month AS month,
+                   COALESCE(total_balance, 0) AS total_balance,
+                   COALESCE(record_count, 0) AS account_count
+            FROM agg_accounts_monthly
+            ORDER BY _gold_month DESC
+            LIMIT 12
+        """.strip()
+
+    if (
+        domain == "insurance"
+        and "premium" in q
+        and "status" in q
+        and has_columns("dim_policies", "status", "premium_amount")
+    ):
+        return """
+            SELECT status AS policy_status,
+                   COALESCE(SUM(premium_amount), 0) AS total_premium,
+                   COUNT(*) AS policy_count
+            FROM dim_policies
+            GROUP BY status
+            ORDER BY total_premium DESC
+        """.strip()
+
+    if domain == "retail":
+        asks_order_count = (
+            any(term in q for term in ("order", "orders"))
+            and any(term in q for term in ("how many", "count", "number of", "total"))
+        )
+        if asks_order_count and "last week" in q:
+            return _generate_databricks_fallback(
+                question,
+                schema_ctx,
+                domain,
+                is_prediction,
+            )
+
+    return None
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_sql(
@@ -20,26 +107,79 @@ def generate_sql(
     role: str = "analyst",
     conversation_context: list[dict[str, str]] | None = None,
 ) -> str:
+    # Records which engine produced the SQL so the response never credits an LLM for a template.
+    source: list[str] = []
+    sql = _generate_sql(
+        question, schema_ctx, is_prediction, domain, llm_override, role, conversation_context, source
+    )
+    # The LLM call records itself; only non-LLM sources need an explicit entry.
+    if not source or not source[0].startswith("llm:"):
+        record_step("sql_generation", source[0] if source else "deterministic fallback template")
+    return sql
+
+
+def _generate_sql(
+    question: str,
+    schema_ctx: dict[str, Any],
+    is_prediction: bool,
+    domain: str,
+    llm_override: str | None,
+    role: str,
+    conversation_context: list[dict[str, str]] | None,
+    source: list[str],
+) -> str:
     if requested_sensitive_type(question) == "admin_only" and role == "admin":
+        source.append("approved sensitive-field template")
         return _generate_admin_sensitive_sql(question, schema_ctx, domain)
 
     if settings.warehouse == "databricks" and _is_credit_score_distribution(question):
+        source.append("verified query template")
         return _generate_credit_score_distribution_sql(schema_ctx)
+
+    if settings.warehouse == "databricks":
+        prompt_sql = _generate_databricks_domain_prompt(
+            question,
+            schema_ctx,
+            domain,
+            is_prediction,
+        )
+        if prompt_sql:
+            source.append("verified query template")
+            return prompt_sql
 
     schema_text = _schema_text(schema_ctx)
     context = format_conversation_context(conversation_context)
-    scope_instruction = (
-        "The active Databricks catalog/schema is already selected for the authorized business domain. "
-        "Do not add a domain predicate unless a domain column exists in the provided schema."
-        if settings.warehouse == "databricks"
-        else f"Always filter domain = '{domain}'."
-    )
+    if domain == "healthcare":
+        scope_instruction = (
+            "Use only the provided healthcare_* tables. Every source has tenant_id; include it in joins "
+            "and filters, but do not invent a tenant value. The server independently enforces the "
+            "authenticated tenant on every source. Return aggregate analytics only; never select "
+            "patient_key or other synthetic record keys."
+        )
+    elif settings.warehouse == "databricks":
+        scope_instruction = (
+            "The active Databricks catalog/schema is already selected for the authorized business domain. "
+            "Do not add a domain predicate unless a domain column exists in the provided schema. "
+            "Never substitute a different business entity or metric just because a requested source is unavailable. "
+            "If the provided schema cannot answer the question, return JSON with an error instead of SQL."
+        )
+    else:
+        scope_instruction = f"Always filter domain = '{domain}'."
     llm_sql = complete_json(
         system=(
             "You are the SQL Generator for a multi-domain BI platform. "
             f"Use ONLY the provided schema. {scope_instruction} "
             "Return JSON {\"sql\": \"SELECT ...\"}. Read-only SELECT. LIMIT 200. "
             "Never use SELECT * or table.*; explicitly select only the columns needed to answer the question."
+            + (
+                " This is a prediction request: do not predict in SQL. For a future value of a metric, return "
+                "the actual history as one row per period (a date or yyyy-MM period column plus the metric), "
+                "ordered by period and covering all available history. For outcomes of individual records "
+                "(for example churn), return one row per record with the historical outcome label and "
+                "descriptive feature columns."
+                if is_prediction
+                else ""
+            )
         ),
         user=(
             f"Recent conversation for interpreting follow-up references:\n{context}\n"
@@ -48,12 +188,33 @@ def generate_sql(
             else f"Question: {question}\nSchema:\n{schema_text}\nPrediction={is_prediction}"
         ),
         override=llm_override,
+        stage="sql_generation",
     )
+    logger.debug("SQL generator provider=%s returned=%s", resolve_provider(llm_override), bool(llm_sql))
+    if llm_sql and llm_sql.get("error"):
+        raise ValueError(str(llm_sql["error"]))
     if llm_sql and llm_sql.get("sql"):
+        source.append(f"llm:{resolve_provider(llm_override)}")
         return str(llm_sql["sql"]).strip().rstrip(";")
 
+    if domain == "healthcare":
+        return _generate_healthcare_fallback(question, schema_ctx, is_prediction)
+
     if settings.warehouse == "databricks":
-        return _generate_databricks_fallback(question, schema_ctx, domain, is_prediction)
+        try:
+            return _generate_databricks_fallback(question, schema_ctx, domain, is_prediction)
+        except ValueError as exc:
+            provider = resolve_provider(llm_override)
+            if provider:
+                # Say which configured model(s) failed instead of implying none is configured.
+                tried = failed_providers("sql_generation") or [provider]
+                reason = last_failure("sql_generation") or "no usable SQL was returned"
+                raise ValueError(
+                    f"The language model{'s' if len(tried) > 1 else ''} ({' and '.join(tried)}) could not "
+                    f"generate SQL for this question (last error: {reason}), and no verified query template "
+                    "covers it. No query was run; please try again."
+                ) from exc
+            raise
 
     q = question.lower()
     d = _quote(domain)
@@ -95,6 +256,7 @@ def generate_sql(
             GROUP BY c.id, c.name, c.segment, c.region, c.churned
             LIMIT 200
         """.strip()
+
 
     if domain == "banking" and any(word in q for word in ("loan", "lending", "npl")):
         dimension, dimension_alias = (
@@ -354,12 +516,48 @@ def _generate_databricks_fallback(
                 f"FROM `{claims}` GROUP BY claim_status ORDER BY total_claim_amount DESC LIMIT 200"
             )
     elif domain == "retail":
-        orders = table_with("order_amount", "region", preferred=("retail_orders",))
-        if orders and any(term in q for term in ("revenue", "sales", "order", "region")):
-            return (
-                f"SELECT region, SUM(order_amount) AS revenue, COUNT(*) AS order_count "
-                f"FROM `{orders}` GROUP BY region ORDER BY revenue DESC LIMIT 200"
+        # Count orders for the previous calendar week using the Gold aggregate.
+        daily_orders = table_with(
+            "record_count",
+            "_gold_date",
+            preferred=("agg_retail_orders_daily",),
+        )
+        asks_order_count = (
+            any(term in q for term in ("order", "orders"))
+            and any(
+                term in q
+                for term in ("how many", "count", "number of", "total")
             )
+        )
+
+        if daily_orders and asks_order_count and "last week" in q:
+            return (
+                "SELECT COALESCE(SUM(CASE WHEN _gold_date >= DATE_SUB("
+                "CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE), 7) "
+                "AND _gold_date < CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE) "
+                "THEN record_count ELSE 0 END), 0) AS order_count, "
+                "MAX(_gold_date) AS latest_data_date, "
+                "DATE_SUB(CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE), 7) "
+                "AS requested_period_start "
+                f"FROM `{daily_orders}` "
+            )
+
+        # Existing fallback for revenue and regional sales questions.
+        orders = table_with(
+            "order_amount",
+            "region",
+            preferred=("retail_orders", "fact_retail_orders", "gold_retail_orders"),
+        )
+        if orders and any(
+            term in q for term in ("revenue", "sales", "order", "region")
+        ):
+            return (
+                f"SELECT region, SUM(order_amount) AS revenue, "
+                f"COUNT(*) AS order_count "
+                f"FROM `{orders}` "
+                f"GROUP BY region ORDER BY revenue DESC LIMIT 200"
+            )
+
 
     raise ValueError(
         f"No safe deterministic Databricks query is available for that {domain} question "
@@ -444,9 +642,77 @@ def _quote(domain: str) -> str:
 def _schema_text(schema_ctx: dict[str, Any]) -> str:
     lines = []
     for table, cols in schema_ctx.get("tables", {}).items():
-        col_s = ", ".join(f"{c['name']} {c['type']}" for c in cols)
+        col_s = ", ".join(
+            f"{c['name']} {c['type']}" + (f" -- {c['description']}" if c.get("description") else "")
+            for c in cols
+        )
         lines.append(f"{table}({col_s})")
     rag_context = schema_ctx.get("rag_context", [])
     if rag_context:
         lines.extend(["Retrieved business context:", *rag_context])
     return "\n".join(lines)
+
+
+def _generate_healthcare_fallback(
+    question: str,
+    schema_ctx: dict[str, Any],
+    is_prediction: bool,
+) -> str:
+    if is_prediction:
+        raise ValueError(
+            "Healthcare prediction queries require an explicitly validated model and cohort policy."
+        )
+    tables = {
+        str(table).lower(): {str(column.get("name", "")).lower() for column in columns}
+        for table, columns in schema_ctx.get("tables", {}).items()
+    }
+    q = question.lower()
+
+    def available(table: str, *columns: str) -> bool:
+        return table in tables and set(columns).issubset(tables[table])
+
+    if any(term in q for term in ("diagnos", "condition")) and available(
+        "healthcare_diagnoses", "tenant_id", "diagnosis_category"
+    ):
+        return (
+            "SELECT diagnosis_category, COUNT(*) AS diagnosis_count "
+            "FROM healthcare_diagnoses WHERE tenant_id IS NOT NULL "
+            "GROUP BY diagnosis_category ORDER BY diagnosis_count DESC LIMIT 200"
+        )
+    if any(term in q for term in ("quality", "screening", "follow-up")) and available(
+        "healthcare_quality_metrics", "tenant_id", "metric_name", "metric_value", "reporting_period"
+    ):
+        return (
+            "SELECT reporting_period, metric_name, AVG(metric_value) AS average_metric_value, "
+            "COUNT(*) AS metric_count FROM healthcare_quality_metrics "
+            "WHERE tenant_id IS NOT NULL GROUP BY reporting_period, metric_name "
+            "ORDER BY reporting_period LIMIT 200"
+        )
+    if any(term in q for term in ("claim", "approved amount", "approval")) and available(
+        "healthcare_claims", "tenant_id", "claim_status", "claim_amount", "approved_amount"
+    ):
+        return (
+            "SELECT claim_status, SUM(claim_amount) AS claim_amount, "
+            "SUM(approved_amount) AS approved_amount, COUNT(*) AS claim_count "
+            "FROM healthcare_claims WHERE tenant_id IS NOT NULL "
+            "GROUP BY claim_status ORDER BY claim_amount DESC LIMIT 200"
+        )
+    if any(term in q for term in ("encounter", "visit", "appointment")) and available(
+        "healthcare_encounters", "tenant_id", "encounter_type", "encounter_status"
+    ):
+        return (
+            "SELECT encounter_type, encounter_status, COUNT(*) AS encounter_count "
+            "FROM healthcare_encounters WHERE tenant_id IS NOT NULL "
+            "GROUP BY encounter_type, encounter_status ORDER BY encounter_count DESC LIMIT 200"
+        )
+    if any(term in q for term in ("patient", "enrollment", "region")) and available(
+        "healthcare_patients", "tenant_id", "postal_region", "patient_status"
+    ):
+        return (
+            "SELECT postal_region, patient_status, COUNT(*) AS patient_count "
+            "FROM healthcare_patients WHERE tenant_id IS NOT NULL "
+            "GROUP BY postal_region, patient_status ORDER BY patient_count DESC LIMIT 200"
+        )
+    raise ValueError(
+        "No supported aggregate Healthcare query is available for that question without a configured language model."
+    )

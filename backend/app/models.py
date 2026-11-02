@@ -1,6 +1,18 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -18,6 +30,92 @@ class AppUser(Base):
     password_hash: Mapped[str] = mapped_column(String(128))
     domain: Mapped[str] = mapped_column(String(40))
     display_name: Mapped[str] = mapped_column(String(120))
+
+
+class UserDomainTenant(Base):
+    __tablename__ = "user_domain_tenants"
+    __table_args__ = (
+        UniqueConstraint("username", "domain", name="uq_user_domain_tenant"),
+        Index("ix_user_domain_tenants_tenant_id", "tenant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(ForeignKey("app_users.username", ondelete="CASCADE"))
+    domain: Mapped[str] = mapped_column(String(40))
+    tenant_id: Mapped[str] = mapped_column(String(64))
+
+
+class UserDomainGrant(Base):
+    """An additional business domain an administrator approved for a user.
+
+    The user's primary domain stays in app_users.domain; administrators (domain "all")
+    implicitly have every domain and never need grants.
+    """
+
+    __tablename__ = "user_domain_grants"
+    __table_args__ = (UniqueConstraint("username", "domain", name="uq_user_domain_grant"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(ForeignKey("app_users.username", ondelete="CASCADE"), index=True)
+    domain: Mapped[str] = mapped_column(String(40))
+    granted_by: Mapped[str] = mapped_column(String(80))
+    granted_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class DomainAccessRequest(Base):
+    __tablename__ = "domain_access_requests"
+    __table_args__ = (
+        # At most one pending request per user and domain, enforced by the database too.
+        Index(
+            "uq_domain_access_request_pending",
+            "username",
+            "requested_domain",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index("ix_domain_access_requests_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(ForeignKey("app_users.username", ondelete="CASCADE"), index=True)
+    current_domain: Mapped[str] = mapped_column(String(40))
+    requested_domain: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 0 until the requester has viewed the decision; drives the in-app notification badge.
+    decision_seen: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AccessAuditEvent(Base):
+    __tablename__ = "access_audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(80), index=True)
+    action: Mapped[str] = mapped_column(String(40))
+    target_username: Mapped[str] = mapped_column(String(80), index=True)
+    domain: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class OAuthIdentity(Base):
+    __tablename__ = "oauth_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uq_oauth_identity"),
+        UniqueConstraint("issuer", "username", name="uq_oauth_user_provider"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issuer: Mapped[str] = mapped_column(String(255))
+    subject: Mapped[str] = mapped_column(String(255))
+    username: Mapped[str] = mapped_column(ForeignKey("app_users.username", ondelete="CASCADE"))
 
 
 class Customer(Base):
@@ -161,6 +259,7 @@ class QueryHistory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(80))
     domain: Mapped[str] = mapped_column(String(40))
+    tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     question: Mapped[str] = mapped_column(Text)
     sql: Mapped[str | None] = mapped_column(Text, nullable=True)
     answer: Mapped[str] = mapped_column(Text)
@@ -178,6 +277,7 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     username: Mapped[str] = mapped_column(String(80), index=True)
     domain: Mapped[str] = mapped_column(String(40), index=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(160))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
@@ -203,7 +303,174 @@ class HitlReview(Base):
     audit_id: Mapped[str] = mapped_column(String(40))
     username: Mapped[str] = mapped_column(String(80))
     domain: Mapped[str] = mapped_column(String(40))
+    tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     question: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="pending")
     reason: Mapped[str] = mapped_column(String(160), default="prediction_or_sensitive")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Approval workflow: the requester's conversation, the reviewing administrator's decision,
+    # and when the approved request was resumed (status "completed").
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class HealthcareFacility(Base):
+    __tablename__ = "healthcare_facilities"
+    __table_args__ = (Index("ix_hc_facilities_tenant_region", "tenant_id", "facility_region"),)
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    facility_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    facility_type: Mapped[str] = mapped_column(String(40))
+    facility_region: Mapped[str] = mapped_column(String(40))
+
+
+class HealthcarePatient(Base):
+    __tablename__ = "healthcare_patients"
+    __table_args__ = (
+        Index("ix_hc_patients_tenant_status", "tenant_id", "patient_status"),
+        Index("ix_hc_patients_tenant_region", "tenant_id", "postal_region"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    patient_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    age_band: Mapped[str] = mapped_column(String(20))
+    sex: Mapped[str] = mapped_column(String(20))
+    postal_region: Mapped[str] = mapped_column(String(40))
+    enrollment_date: Mapped[date] = mapped_column(Date)
+    patient_status: Mapped[str] = mapped_column(String(40))
+
+
+class HealthcareProvider(Base):
+    __tablename__ = "healthcare_providers"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "facility_key"],
+            ["healthcare_facilities.tenant_id", "healthcare_facilities.facility_key"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_hc_providers_tenant_specialty", "tenant_id", "provider_specialty"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_specialty: Mapped[str] = mapped_column(String(60))
+    facility_key: Mapped[str] = mapped_column(String(64))
+    provider_region: Mapped[str] = mapped_column(String(40))
+
+
+class HealthcareEncounter(Base):
+    __tablename__ = "healthcare_encounters"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "patient_key"],
+            ["healthcare_patients.tenant_id", "healthcare_patients.patient_key"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "provider_key"],
+            ["healthcare_providers.tenant_id", "healthcare_providers.provider_key"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "facility_key"],
+            ["healthcare_facilities.tenant_id", "healthcare_facilities.facility_key"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_hc_encounters_tenant_date", "tenant_id", "encounter_date"),
+        Index("ix_hc_encounters_tenant_status", "tenant_id", "encounter_status"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    encounter_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    patient_key: Mapped[str] = mapped_column(String(64))
+    provider_key: Mapped[str] = mapped_column(String(64))
+    facility_key: Mapped[str] = mapped_column(String(64))
+    encounter_date: Mapped[date] = mapped_column(Date)
+    encounter_type: Mapped[str] = mapped_column(String(40))
+    encounter_status: Mapped[str] = mapped_column(String(40))
+
+
+class HealthcareDiagnosis(Base):
+    __tablename__ = "healthcare_diagnoses"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "encounter_key"],
+            ["healthcare_encounters.tenant_id", "healthcare_encounters.encounter_key"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_hc_diagnoses_tenant_category", "tenant_id", "diagnosis_category"),
+        Index("ix_hc_diagnoses_tenant_date", "tenant_id", "diagnosis_date"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    diagnosis_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    encounter_key: Mapped[str] = mapped_column(String(64))
+    diagnosis_code: Mapped[str] = mapped_column(String(40))
+    diagnosis_category: Mapped[str] = mapped_column(String(60))
+    diagnosis_date: Mapped[date] = mapped_column(Date)
+
+
+class HealthcareProcedure(Base):
+    __tablename__ = "healthcare_procedures"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "encounter_key"],
+            ["healthcare_encounters.tenant_id", "healthcare_encounters.encounter_key"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_hc_procedures_tenant_category", "tenant_id", "procedure_category"),
+        Index("ix_hc_procedures_tenant_date", "tenant_id", "procedure_date"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    procedure_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    encounter_key: Mapped[str] = mapped_column(String(64))
+    procedure_code: Mapped[str] = mapped_column(String(40))
+    procedure_category: Mapped[str] = mapped_column(String(60))
+    procedure_date: Mapped[date] = mapped_column(Date)
+
+
+class HealthcareClaim(Base):
+    __tablename__ = "healthcare_claims"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "encounter_key"],
+            ["healthcare_encounters.tenant_id", "healthcare_encounters.encounter_key"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_hc_claims_tenant_date", "tenant_id", "service_date"),
+        Index("ix_hc_claims_tenant_status", "tenant_id", "claim_status"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    claim_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    encounter_key: Mapped[str] = mapped_column(String(64))
+    service_date: Mapped[date] = mapped_column(Date)
+    claim_amount: Mapped[float] = mapped_column(Float)
+    approved_amount: Mapped[float] = mapped_column(Float)
+    claim_status: Mapped[str] = mapped_column(String(40))
+    payer_key: Mapped[str] = mapped_column(String(64))
+
+
+class HealthcareQualityMetric(Base):
+    __tablename__ = "healthcare_quality_metrics"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "facility_key"],
+            ["healthcare_facilities.tenant_id", "healthcare_facilities.facility_key"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_hc_quality_tenant_date", "tenant_id", "metric_date"),
+        Index("ix_hc_quality_tenant_name", "tenant_id", "metric_name"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    metric_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    facility_key: Mapped[str] = mapped_column(String(64))
+    metric_date: Mapped[date] = mapped_column(Date)
+    metric_name: Mapped[str] = mapped_column(String(80))
+    metric_value: Mapped[float] = mapped_column(Float)
+    reporting_period: Mapped[str] = mapped_column(String(20))

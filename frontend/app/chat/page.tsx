@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
 import {
   Activity,
-
   ArrowLeft,
   ArrowRight,
   BarChart3,
@@ -14,7 +13,6 @@ import {
   ChevronDown,
   CircleHelp,
   Clock3,
-  Folder,
   History,
   LoaderCircle,
   Menu,
@@ -23,7 +21,6 @@ import {
   Pin,
   Plus,
   Send,
-  ShieldCheck,
   Sparkles,
   SquarePen,
   Trash2,
@@ -31,7 +28,7 @@ import {
   X,
 } from "lucide-react";
 import { ResultWorkspace } from "@/components/ResultWorkspace";
-import { api } from "@/lib/api";
+import { API_URL, api } from "@/lib/api";
 import {
   detectSensitivePrompt,
   sensitivePromptNotice,
@@ -68,20 +65,41 @@ type Conversation = {
   sensitiveWarning?: boolean;
 };
 type ConversationMeta = { title?: string; pinned?: boolean };
-type Provider = "auto" | "openai" | "grok" | "anthropic" | "ollama";
+type Provider = "auto" | "google" | "openai" | "grok" | "anthropic" | "ollama";
 
-const SUGGESTIONS = [
-  { icon: Activity, title: "Weekly performance", question: "How many orders did we get last week?", detail: "Orders and revenue over the last week" },
-  { icon: BarChart3, title: "Revenue by region", question: "What is revenue by region?", detail: "Compare business across regions" },
-  { icon: MessageSquareText, title: "Customer segments", question: "Break down revenue by customer segment", detail: "Find your highest-value segments" },
-  { icon: Sparkles, title: "Predict customer churn", question: "Predict which customers are likely to churn", detail: "Use the TabPFN prediction workflow" },
-];
+// The API reports how each answer was reached; only "complete" is a successful analysis.
+const STATUS_LABELS: Record<string, string> = {
+  complete: "Analysis complete",
+  no_data: "No matching data",
+  insufficient_data: "Insufficient data",
+  needs_clarification: "Clarification needed",
+  awaiting_review: "Awaiting administrator review",
+  error: "Could not complete",
+};
 
-const FOLDERS = [
-  { name: "Retail insights", domain: "Retail", tone: "cyan" },
-  { name: "Q3 finance reports", domain: "Finance", tone: "violet" },
-  { name: "Customer health", domain: "All domains", tone: "emerald" },
-];
+const SUGGESTIONS_BY_DOMAIN = {
+  banking: [
+    { icon: Activity, title: "Transaction activity", question: "Show transaction volume for last week", detail: "Review recent banking transaction totals" },
+    { icon: BarChart3, title: "Account balances", question: "Show the latest account balance totals", detail: "See the most recent account balance summary" },
+  ],
+  finance: [
+    { icon: Activity, title: "Monthly balances", question: "Show account balances by month", detail: "Review the monthly account balance trend" },
+    { icon: BarChart3, title: "Latest balances", question: "Show the latest account balance totals", detail: "See the most recent account balance summary" },
+  ],
+  insurance: [
+    { icon: Activity, title: "Policy premiums", question: "Show total premium by policy status", detail: "Compare premium totals across policy statuses" },
+    { icon: BarChart3, title: "Claims activity", question: "How many claims were recorded last month?", detail: "Review recent claims volume" },
+  ],
+  retail: [
+    { icon: Activity, title: "Weekly orders", question: "How many orders did we get last week?", detail: "Count orders from the previous calendar week" },
+    { icon: BarChart3, title: "Revenue by region", question: "What is revenue by region?", detail: "Compare order revenue across regions" },
+    { icon: MessageSquareText, title: "Sales trends", question: "Show monthly retail sales trend", detail: "Review monthly order value and volume" },
+  ],
+  healthcare: [
+    { icon: Activity, title: "Common diagnoses", question: "What are the most common diagnosis categories?", detail: "Review aggregate diagnosis counts" },
+    { icon: BarChart3, title: "Encounter activity", question: "How many encounters were recorded?", detail: "Review aggregate encounter volume" },
+  ],
+} satisfies Record<string, { icon: typeof Activity; title: string; question: string; detail: string }[]>;
 
 const messageVariants: Variants = {
   hidden: { opacity: 0, y: 18 },
@@ -154,15 +172,24 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activeConversation = conversations.find((item) => item.id === activeId) ?? null;
+  const suggestions = SUGGESTIONS_BY_DOMAIN[domain as keyof typeof SUGGESTIONS_BY_DOMAIN] ?? [];
   const isConversationActive = activeConversation !== null;
   const pinnedItems = useMemo(() => conversations.filter((item) => meta[item.id]?.pinned), [conversations, meta]);
   const recentItems = useMemo(() => conversations.filter((item) => !meta[item.id]?.pinned), [conversations, meta]);
 
+  function signOut() {
+    fetch(`${API_URL}/auth/logout`, { method: "POST", credentials: "include" })
+      .catch((error: unknown) => console.error("Could not close the server session", error))
+      .finally(() => {
+        localStorage.removeItem("ryze_token");
+        localStorage.removeItem("ryze_user");
+        localStorage.removeItem("ryze_domain");
+        localStorage.removeItem("ryze_role");
+        router.push("/login");
+      });
+  }
+
   useEffect(() => {
-    if (!localStorage.getItem("ryze_token")) {
-      router.replace("/login");
-      return;
-    }
     setUsername(localStorage.getItem("ryze_user") || "Analyst");
     setDomain(localStorage.getItem("ryze_domain") || "workspace");
     try {
@@ -294,51 +321,71 @@ export default function ChatPage() {
           conversation_id: selectedConversation?.conversationId ?? null,
         }),
       });
-      const turn: ConversationTurn = {
-        question: submitted,
-        answer: result.answer,
-        sql: result.sql,
-        created_at: new Date().toISOString(),
-        result,
-      };
-      const conversationId = result.conversation_id || selectedConversation?.conversationId;
-      if (selectedConversation?.conversationId && conversationId === selectedConversation.conversationId) {
-        setConversations((current) => current.map((item) => item.id === selectedConversation.id
-          ? {
-              ...item,
-              answer: turn.answer,
-              sql: turn.sql,
-              created_at: turn.created_at,
-              result,
-              turns: [...(item.turns ?? [{
-                question: item.question,
-                answer: item.answer,
-                sql: item.sql,
-                created_at: item.created_at,
-                result: item.result,
-              }]), turn],
-            }
-          : item));
-        setActiveId(selectedConversation.id);
-      } else {
-        const id = conversationId
-          ? `thread-${conversationId}`
-          : `query-${result.audit_id || Date.now()}`;
-        const conversation: Conversation = {
-          id,
-          conversationId: conversationId ?? undefined,
-          ...turn,
-          turns: [turn],
-        };
-        setConversations((current) => [conversation, ...current]);
-        setActiveId(id);
-      }
+      applyResult(selectedConversation, submitted, result);
       setQuestion("");
       setSidebarOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The analysis could not be completed.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** Continue a prediction an administrator approved, in its original conversation. */
+  async function resumeReview(reviewId: number, originalQuestion: string) {
+    if (busy) return;
+    const selectedConversation = activeConversation;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<Result>(`/hitl/${reviewId}/resume`, { method: "POST" });
+      applyResult(selectedConversation, originalQuestion, result);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The approved request could not be run.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyResult(selectedConversation: Conversation | null, submitted: string, result: Result) {
+    const turn: ConversationTurn = {
+      question: submitted,
+      answer: result.answer,
+      sql: result.sql,
+      created_at: new Date().toISOString(),
+      result,
+    };
+    const conversationId = result.conversation_id || selectedConversation?.conversationId;
+    if (selectedConversation?.conversationId && conversationId === selectedConversation.conversationId) {
+      setConversations((current) => current.map((item) => item.id === selectedConversation.id
+        ? {
+            ...item,
+            answer: turn.answer,
+            sql: turn.sql,
+            created_at: turn.created_at,
+            result,
+            turns: [...(item.turns ?? [{
+              question: item.question,
+              answer: item.answer,
+              sql: item.sql,
+              created_at: item.created_at,
+              result: item.result,
+            }]), turn],
+          }
+        : item));
+      setActiveId(selectedConversation.id);
+    } else {
+      const id = conversationId
+        ? `thread-${conversationId}`
+        : `query-${result.audit_id || Date.now()}`;
+      const conversation: Conversation = {
+        id,
+        conversationId: conversationId ?? undefined,
+        ...turn,
+        turns: [turn],
+      };
+      setConversations((current) => [conversation, ...current]);
+      setActiveId(id);
     }
   }
 
@@ -379,34 +426,42 @@ export default function ChatPage() {
 
   return (
     <main className="chat-app">
-      <header className="chat-brandbar">
-        <Link href="/" className="chat-brandbar__brand">
-          <span className="chat-brandbar__mark"><BarChart3 size={17} /></span>
-          <span>RYZE <b>AI/BI</b></span>
+      <header className="app-header chat-app-header">
+        <Link href="/" className="app-brand chat-app-brand">
+          <span className="app-brand__name">RYZE AI/BI</span>
+          <span className="app-brand__tagline">GOVERNED BUSINESS ASSISTANT</span>
         </Link>
-        <span className="chat-brandbar__edition">GOVERNED BUSINESS ASSISTANT</span>
-        <div className="chat-brandbar__account">
-          <span className="chat-brandbar__user">{username || "Analyst"}</span>
-          <span className="chat-brandbar__domain">{domain}</span>
-          <label className="chat-provider">
-            <span className="sr-only">Language model provider</span>
-            <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-              <option value="auto">Auto</option>
-              <option value="openai">OpenAI</option>
-              <option value="grok">Grok</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="ollama">Ollama</option>
-            </select>
-            <ChevronDown size={13} />
-          </label>
-        </div>
+        <nav className="app-navigation chat-app-navigation" aria-label="Main navigation">
+          <Link href="/context" className="app-navigation__link">Foresight</Link>
+          <Link href="/dashboard" className="app-navigation__link">Dashboard</Link>
+          <Link href="/chat" className="app-navigation__link app-navigation__link--active" aria-current="page">Ask</Link>
+          <Link href="/settings" className="app-navigation__link">Connect</Link>
+          <details className="app-account-menu">
+            <summary className="app-account-menu__summary">
+              <span className="app-account-menu__avatar">{username.slice(0, 1).toUpperCase() || "U"}</span>
+              <span>{username || "User"} · {domain}</span>
+              <ChevronDown size={14} aria-hidden="true" />
+            </summary>
+            <div className="app-account-menu__panel">
+              <span>{username || "Signed-in user"}</span>
+              <small>Authorized domain: {domain}</small>
+              <label className="chat-provider chat-provider--menu">
+                <span>Language model provider</span>
+                <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
+                  <option value="auto">Auto</option>
+                  <option value="google">Google Gemini</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="grok">Grok</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="ollama">Ollama</option>
+                </select>
+                <ChevronDown size={13} />
+              </label>
+              <button type="button" onClick={signOut}>Sign out</button>
+            </div>
+          </details>
+        </nav>
       </header>
-      <div className="chat-systembar">
-        <span><ShieldCheck size={13} /> Governed analytics</span>
-        <span className="chat-systembar__separator" />
-        <span>Questions and results stay scoped to your signed-in business domain.</span>
-        <span className="chat-systembar__domain">{domain}</span>
-      </div>
       <nav className="chat-module-nav" aria-label="Ask workspace">
         <button type="button" className="chat-icon-button chat-menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu size={17} /></button>
         <Link href="/chat" className="chat-module-nav__link chat-module-nav__link--active"><Sparkles size={13} /> Ask</Link>
@@ -434,9 +489,9 @@ export default function ChatPage() {
         aria-label="Conversation navigation"
       >
         <div className="chat-sidebar__top">
-          <Link href="/" className="chat-sidebar__brand" aria-label="FD AIBI home">
+          <Link href="/" className="chat-sidebar__brand" aria-label="FD AI/BI home">
             <span className="chat-sidebar__brand-icon"><BarChart3 size={19} /></span>
-            <span>FD <b>AIBI</b></span>
+            <span>FD <b>AI/BI</b></span>
           </Link>
           <button type="button" className="chat-icon-button chat-sidebar__mobile-close" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}>
             <X size={18} />
@@ -454,30 +509,6 @@ export default function ChatPage() {
         </motion.button>
 
         <div className="chat-sidebar__scroll">
-          <section className="chat-sidebar-section" aria-labelledby="pinned-folders-heading">
-            <div className="chat-sidebar-section__heading">
-              <span id="pinned-folders-heading">Pinned folders</span>
-              <button type="button" className="chat-icon-button chat-icon-button--small" aria-label="Pinned folders" title="Pinned folders"><MoreHorizontal size={17} /></button>
-            </div>
-            <div className="chat-folder-list">
-              {FOLDERS.map((folder) => (
-                <button
-                  className="chat-folder"
-                  type="button"
-                  key={folder.name}
-                  onClick={() => {
-                    const match = conversations.find((item) => item.question.toLowerCase().includes(folder.domain.toLowerCase()));
-                    if (match) selectConversation(match);
-                  }}
-                >
-                  <Folder className={`chat-folder__icon chat-folder__icon--${folder.tone}`} size={15} />
-                  <span>{folder.name}</span>
-                  <ChevronDown className="chat-folder__chevron" size={13} />
-                </button>
-              ))}
-            </div>
-          </section>
-
           <section className="chat-sidebar-section chat-history-section" aria-labelledby="recent-history-heading">
             <div className="chat-sidebar-section__heading">
               <span id="recent-history-heading">Recent history</span>
@@ -513,7 +544,7 @@ export default function ChatPage() {
         <div className="chat-sidebar__footer">
           <div className="chat-user-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
           <div className="chat-user-details"><b>{username || "Analyst"}</b><span>{domain}</span></div>
-          <button type="button" className="chat-icon-button" aria-label="Sign out" title="Sign out" onClick={() => { localStorage.clear(); router.push("/"); }}>
+          <button type="button" className="chat-icon-button" aria-label="Sign out" title="Sign out" onClick={signOut}>
             <ArrowLeft size={16} />
           </button>
         </div>
@@ -524,13 +555,13 @@ export default function ChatPage() {
           {!isConversationActive ? (
             <motion.div className="chat-welcome" initial="hidden" animate="visible" variants={{ visible: { transition: { staggerChildren: 0.07 } } }}>
               <motion.div variants={messageVariants} className="chat-welcome__icon"><Sparkles size={23} /></motion.div>
-              <motion.p variants={messageVariants} className="chat-welcome__eyebrow">FD AIBI ANALYTICS</motion.p>
+              <motion.p variants={messageVariants} className="chat-welcome__eyebrow">FD AI/BI ANALYTICS</motion.p>
               <motion.h1 variants={messageVariants}>Natural Language to Insights</motion.h1>
               <motion.p variants={messageVariants} className="chat-welcome__description">
                 Ask a business question. Explore trusted data, discover patterns, and get an answer with the analysis behind it.
               </motion.p>
               <motion.div variants={messageVariants} className="chat-suggestions" aria-label="Suggested business questions">
-                {SUGGESTIONS.map(({ icon: Icon, title, question: prompt, detail }) => (
+                {suggestions.map(({ icon: Icon, title, question: prompt, detail }) => (
                   <motion.button
                     key={prompt}
                     type="button"
@@ -584,17 +615,36 @@ export default function ChatPage() {
                         </div>
                         <div className="chat-assistant-content">
                           <div className="chat-assistant-heading">
-                            <span>{turn.sensitiveWarning ? "Sensitive-data notice" : "FD AIBI"}</span>
+                            <span>{turn.sensitiveWarning ? "Sensitive-data notice" : "FD AI/BI"}</span>
                             {turn.sensitiveWarning
                               ? <small className="chat-sensitive-warning__label">Protected information</small>
-                              : <small><Check size={12} /> Analysis complete</small>}
+                              : (
+                                <small className={`chat-status chat-status--${turn.result?.status ?? "complete"}`}>
+                                  {(turn.result?.status ?? "complete") === "complete" ? <Check size={12} /> : <TriangleAlert size={12} />}{" "}
+                                  {STATUS_LABELS[turn.result?.status ?? "complete"] ?? "Analysis complete"}
+                                </small>
+                              )}
                           </div>
                           {turn.sensitiveWarning ? (
                             <p className="chat-answer-text chat-answer-text--warning" role="alert">
                               <TriangleAlert size={16} aria-hidden="true" />
                               <span>{turn.answer}</span>
                             </p>
-                          ) : <p className="chat-answer-text">{turn.answer}</p>}
+                          ) : (
+                            <p className={`chat-answer-text${turn.result?.status && turn.result.status !== "complete" ? ` chat-answer-text--${turn.result.status}` : ""}`}>
+                              {turn.answer}
+                            </p>
+                          )}
+                          {turn.result?.status === "awaiting_review" && turn.result.hitl?.review_id ? (
+                            <button
+                              type="button"
+                              className="chat-resume-button"
+                              disabled={busy}
+                              onClick={() => void resumeReview(turn.result!.hitl!.review_id!, turn.question)}
+                            >
+                              Run approved prediction
+                            </button>
+                          ) : null}
                           {!turn.sensitiveWarning && restoringId === activeConversation.id ? (
                             <div className="chat-sidebar-empty"><LoaderCircle size={14} className="chat-spin" /> Restoring charts and analysis details…</div>
                           ) : !turn.sensitiveWarning && turn.result ? (
