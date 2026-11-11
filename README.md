@@ -4,6 +4,8 @@ Multi-business chat BI: **Banking / Finance / Healthcare / Insurance / Retail**.
 
 Databricks **Genie is not used**. A Databricks SQL Warehouse or Snowflake can be configured as the live source for chat queries, TabPFN input rows, and dashboard metrics.
 
+Ask AI design and operations: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/RUNBOOK.md](docs/RUNBOOK.md). Banking: [metric registry](docs/BANKING_METRICS.md). Plans and AI usage: [docs/SUBSCRIPTIONS.md](docs/SUBSCRIPTIONS.md).
+
 ## Demo logins
 
 | User | Password | Domain |
