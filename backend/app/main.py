@@ -49,6 +49,7 @@ from .services.observability import current_request_id
 from .cache import LocalTTLCache, rate_limit_exceeded, scoped_key, set_json as cache_set_json
 from .config import settings
 from .db import SessionLocal, engine, get_db
+from .deployment import allows_http_urls, cookie_secure, enforce_startup_policy
 from .domains import DEMO_USERS, DOMAINS, DOMAIN_LABELS, PROMPTS
 from .llm import provider_status
 from .models import (
@@ -166,10 +167,8 @@ def _get_conversation_context(
 
 @app.on_event("startup")
 def startup() -> None:
-    if not settings.demo_mode and (
-        settings.jwt_secret == "ryze-dev-secret-change-me" or len(settings.jwt_secret) < 32
-    ):
-        raise RuntimeError("Set a unique JWT_SECRET with at least 32 characters before disabling DEMO_MODE.")
+    # Before any schema change or seeding, so a refused configuration touches nothing.
+    enforce_startup_policy(engine)
     ensure_schema()
     db = SessionLocal()
     try:
@@ -280,7 +279,7 @@ def _oidc_client():
     discovery = urlsplit(discovery_url)
     local_hosts = {"localhost", "127.0.0.1"}
     if (
-        redirect.scheme not in ({"https", "http"} if settings.demo_mode else {"https"})
+        redirect.scheme not in ({"https", "http"} if allows_http_urls() else {"https"})
         or not redirect.hostname
         or (redirect.scheme == "http" and redirect.hostname not in local_hosts)
         or redirect.username
@@ -290,7 +289,7 @@ def _oidc_client():
         or redirect.query
         or discovery.scheme != "https"
         or not discovery.hostname
-        or frontend.scheme not in ({"https", "http"} if settings.demo_mode else {"https"})
+        or frontend.scheme not in ({"https", "http"} if allows_http_urls() else {"https"})
         or not frontend.hostname
         or (frontend.scheme == "http" and frontend.hostname not in local_hosts)
         or frontend.path not in {"", "/"}
@@ -544,7 +543,7 @@ async def oidc_callback(request: Request, db: Session = Depends(get_db)):
                 onboarding_token,
                 max_age=ONBOARDING_TOKEN_MINUTES * 60,
                 httponly=True,
-                secure=not settings.demo_mode,
+                secure=cookie_secure(),
                 samesite="lax",
                 path=ONBOARDING_COOKIE_PATH,
             )
@@ -617,7 +616,7 @@ async def oidc_callback(request: Request, db: Session = Depends(get_db)):
         app_token,
         max_age=settings.access_token_expire_minutes * 60,
         httponly=True,
-        secure=not settings.demo_mode,
+        secure=cookie_secure(),
         samesite="lax",
         path="/",
     )
@@ -678,7 +677,7 @@ def oidc_onboarding_complete(
             create_access_token(account.username, account.domain, "analyst"),
             max_age=settings.access_token_expire_minutes * 60,
             httponly=True,
-            secure=not settings.demo_mode,
+            secure=cookie_secure(),
             samesite="lax",
             path="/",
         )
@@ -686,7 +685,7 @@ def oidc_onboarding_complete(
         ONBOARDING_COOKIE,
         path=ONBOARDING_COOKIE_PATH,
         httponly=True,
-        secure=not settings.demo_mode,
+        secure=cookie_secure(),
         samesite="lax",
     )
     return response
@@ -1324,5 +1323,5 @@ fastapi_app.add_middleware(
     secret_key=settings.jwt_secret,
     max_age=settings.access_token_expire_minutes * 60,
     same_site="lax",
-    https_only=not settings.demo_mode,
+    https_only=cookie_secure(),
 )

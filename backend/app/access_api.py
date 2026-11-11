@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .auth import AuthUser, create_access_token, get_current_user, has_domain_access, require_admin
 from .config import settings
 from .db import get_db
+from .deployment import cookie_secure
 from .domains import DOMAIN_LABELS
 from .models import AppUser, UserDomainTenant
 from .schemas import (
@@ -60,7 +61,7 @@ def switch_domain(
         token,
         max_age=settings.access_token_expire_minutes * 60,
         httponly=True,
-        secure=not settings.demo_mode,
+        secure=cookie_secure(),
         samesite="lax",
         path="/",
     )

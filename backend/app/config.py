@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "RYZE AI/BI"
+    # development, staging or production. Outside development, startup refuses demo shortcuts,
+    # weak secrets, plain HTTP and a superuser database connection (app/deployment.py).
+    environment: str = "development"
+    # Development only: allows non-loopback addresses, with insecure cookies, for a trusted LAN demo.
+    allow_insecure_development: bool = False
     jwt_secret: str = "ryze-dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
@@ -24,7 +29,8 @@ class Settings(BaseSettings):
     cache_url: str = ""
     cache_ttl_seconds: int = 120
     warehouse: str = "local"
-    demo_mode: bool = True
+    # Seeds demo accounts and shows their passwords at sign-in. Never allowed outside development.
+    demo_mode: bool = False
     query_row_limit: int = 200
     query_timeout_seconds: int = 8
     llm_timeout_seconds: int = 30
