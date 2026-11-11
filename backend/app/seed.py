@@ -124,6 +124,7 @@ def ensure_schema() -> None:
                 "Automatic migration is not safe and no data was changed; back up and migrate it explicitly."
             )
     Base.metadata.create_all(bind=engine)
+    _add_column_if_missing("knowledge_chunks", "embedding", "TEXT")
     _add_column_if_missing("query_history", "audit_id", "VARCHAR(40)")
     _add_column_if_missing("query_history", "tables_used", "VARCHAR(240)")
     _add_column_if_missing("query_history", "row_count", "INTEGER DEFAULT 0")

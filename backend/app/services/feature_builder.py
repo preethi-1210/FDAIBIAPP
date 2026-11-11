@@ -106,6 +106,7 @@ def build_forecast(question: str, rows: list[dict[str, Any]]) -> dict[str, Any] 
         "history_start": series["period"].iloc[0].strftime(label_format),
         "history_end": series["period"].iloc[-1].strftime(label_format),
         "last_value": float(values[-1]),
+        "values": values,
         "periods": periods,
     }
 

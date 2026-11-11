@@ -165,7 +165,7 @@ def _source(domain: str, tenant_id: str | None) -> ReportSource | None:
             # exactly to agg_accounts_monthly), so values are additive and support daily,
             # weekly, monthly and quarterly intervals. It is not a balance snapshot.
             return ReportSource(
-                "a._gold_date", "a.total_balance", "SUM(a.record_count)",
+                "a._gold_date", "a.total_cash_balance", "SUM(a.record_count)",
                 f"{catalog}.{schema}.`agg_accounts_daily` a",
                 "", None, None,
                 "opened_account_balance", "Balance of accounts opened", "currency",

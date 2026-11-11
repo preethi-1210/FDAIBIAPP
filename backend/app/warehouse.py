@@ -10,7 +10,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .config import settings
 from .db import engine
-from .services.guardrail import GuardrailError, _jsonable, validate_sql
+from .services.guardrail import GuardrailError, _jsonable, effective_row_limit, validate_sql
+from .services.reliability import CircuitBreaker, retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ _databricks_pool_lock = Lock()
 _databricks_idle: dict[tuple[str, str, str, str], list[tuple[float, Any]]] = {}
 # Independent dashboard/report queries run concurrently on separate pooled sessions.
 _query_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="warehouse-query")
+_databricks_breaker = CircuitBreaker("databricks")
 
 
 def warehouse_status() -> dict[str, Any]:
@@ -82,8 +84,8 @@ def execute_readonly(
     parameters: Mapping[str, Any] | None = None,
     row_limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    safe_sql = validate_sql(sql)
-    fetch_limit = settings.query_row_limit if row_limit is None else max(1, min(row_limit, 2000))
+    fetch_limit = effective_row_limit(row_limit)
+    safe_sql = validate_sql(sql, fetch_limit)
     if settings.warehouse == "databricks":
         return _databricks_execute_many(
             [safe_sql],
@@ -114,8 +116,8 @@ def execute_readonly_many(
     row_limit: int | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Run independent parameterized read-only queries; on Databricks they run concurrently."""
-    safe = [(validate_sql(sql), parameters) for sql, parameters in statements]
-    fetch_limit = settings.query_row_limit if row_limit is None else max(1, min(row_limit, 2000))
+    fetch_limit = effective_row_limit(row_limit)
+    safe = [(validate_sql(sql, fetch_limit), parameters) for sql, parameters in statements]
     if settings.warehouse == "databricks":
         return _databricks_execute_many(
             [sql for sql, _parameters in safe],
@@ -139,7 +141,8 @@ def execute_readonly_batch(
     queries: list[str],
     domain: str | None = None,
 ) -> list[list[dict[str, Any]]]:
-    safe_queries = [validate_sql(query) for query in queries]
+    fetch_limit = effective_row_limit()
+    safe_queries = [validate_sql(query, fetch_limit) for query in queries]
     if settings.warehouse == "databricks":
         return _databricks_execute_many(safe_queries, domain=domain)
     if settings.warehouse == "snowflake":
@@ -151,7 +154,7 @@ def execute_readonly_batch(
                 if settings.database_url.startswith(("postgresql", "sqlite")):
                     conn.execute(text(f"EXPLAIN {sql}"))
                 result = conn.execute(text(sql))
-                rows = [dict(row._mapping) for row in result.fetchmany(settings.query_row_limit)]
+                rows = [dict(row._mapping) for row in result.fetchmany(fetch_limit)]
                 results.append(_jsonable(rows))
             return results
     except SQLAlchemyError as exc:
@@ -226,14 +229,15 @@ def execute_databricks_domain_batch(
     )
     if not warehouse_status()["ready"]:
         raise GuardrailError("Databricks warehouse is not configured yet")
-    safe_queries = [validate_sql(query) for query in queries]
+    fetch_limit = effective_row_limit()
+    safe_queries = [validate_sql(query, fetch_limit) for query in queries]
     try:
         return _databricks_run(
             catalog.strip("`"),
             schema.strip("`"),
             safe_queries,
             None,
-            settings.query_row_limit,
+            fetch_limit,
         )
     except GuardrailError:
         raise
@@ -246,6 +250,32 @@ def execute_databricks_domain_batch(
         raise GuardrailError(
             f"Databricks query failed for {domain}.{settings.databricks_domain_schema}: {message}"
         ) from exc
+
+
+def execute_healthcare_tenant_readonly(
+    sql: str,
+    tenant_id: str | None,
+    parameters: Mapping[str, Any] | None = None,
+    row_limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """A read-only query in the catalog an administrator mapped to this tenant, and nowhere else."""
+    if settings.warehouse != "databricks":
+        raise GuardrailError("Healthcare tenant queries require the Databricks warehouse.")
+    if not tenant_id:
+        raise GuardrailError("Healthcare access requires an administrator-provisioned tenant assignment.")
+    catalog = databricks_healthcare_tenant_catalog(tenant_id)
+    _validate_identifier(catalog, "DATABRICKS_HEALTHCARE_TENANT_CATALOGS")
+    _validate_identifier(settings.databricks_domain_schema, "DATABRICKS_DOMAIN_SCHEMA")
+    if not warehouse_status()["ready"]:
+        raise GuardrailError("Databricks warehouse is not configured yet")
+    fetch_limit = effective_row_limit(row_limit)
+    try:
+        return _databricks_run(catalog, settings.databricks_domain_schema, [validate_sql(sql, fetch_limit)], [parameters or {}], fetch_limit)[0]
+    except GuardrailError:
+        raise
+    except Exception as exc:
+        message = str(exc).replace(settings.databricks_token, "[redacted]") if settings.databricks_token else str(exc)
+        raise GuardrailError(f"Databricks SQL connection or query failed: {message}") from exc
 
 
 def warehouse_schema_columns(domain: str | None = None) -> dict[str, list[dict[str, str]]]:
@@ -312,6 +342,12 @@ def _group_schema_columns(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
     return tables
 
 
+_RETAIL_HEALTH_TABLES = {
+    "gold_orders", "gold_customers", "gold_products", "gold_order_items",
+    "gold_payments", "gold_inventory", "gold_returns", "gold_stores",
+}
+
+
 def test_warehouse_connection(domain: str | None = None) -> dict[str, Any]:
     status = warehouse_status()
     if status["mode"] not in {"databricks", "snowflake"}:
@@ -324,7 +360,7 @@ def test_warehouse_connection(domain: str | None = None) -> dict[str, Any]:
                 "banking": {"agg_accounts_daily", "agg_transactions_daily"},
                 "finance": {"agg_accounts_monthly"},
                 "insurance": {"agg_claims_daily", "agg_policies_daily"},
-                "retail": {"agg_retail_orders_daily", "fact_retail_orders"},
+                "retail": _RETAIL_HEALTH_TABLES,
             }
             checked_domains = []
             configured_domains = [
@@ -412,7 +448,7 @@ def verify_warehouse_domain(domain: str) -> dict[str, Any]:
             ),
         ],
         "finance": [
-            "SELECT _gold_month, COALESCE(total_balance, 0) AS total_balance, "
+            "SELECT _gold_month, COALESCE(total_cash_balance, 0) AS total_cash_balance, "
             "COALESCE(record_count, 0) AS account_count "
             "FROM agg_accounts_monthly ORDER BY _gold_month DESC LIMIT 1"
         ],
@@ -421,19 +457,21 @@ def verify_warehouse_domain(domain: str) -> dict[str, Any]:
             "COALESCE(record_count, 0) AS policy_count "
             "FROM agg_policies_daily ORDER BY _gold_date DESC LIMIT 1"
         ],
+        # Names the columns the Retail queries rely on, so a renamed column fails here too.
         "retail": [
-            "SELECT COALESCE(SUM(record_count), 0) AS order_count, "
-            "COALESCE(SUM(total_order_amount), 0) AS total_order_amount "
-            "FROM agg_retail_orders_daily WHERE _gold_date >= DATE_SUB("
-            "CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE), 7) "
-            "AND _gold_date < CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)"
+            "SELECT COUNT(order_id) AS order_count, COUNT(DISTINCT customer_id) AS customer_count, "
+            "COUNT(DISTINCT store_id) AS store_count, COUNT(DISTINCT channel) AS channel_count, "
+            "COUNT(DISTINCT order_status) AS order_status_count, MIN(order_date) AS first_order_date "
+            "FROM gold_orders",
+            "SELECT COUNT(customer_id) AS customer_count, COUNT(DISTINCT loyalty_tier) AS loyalty_tier_count, "
+            "MIN(signup_date) AS first_signup_date FROM gold_customers",
         ],
     }
     expected_tables = {
         "banking": {"agg_accounts_daily", "agg_transactions_daily"},
         "finance": {"agg_accounts_monthly"},
         "insurance": {"agg_claims_daily", "agg_policies_daily"},
-        "retail": {"agg_retail_orders_daily", "fact_retail_orders"},
+        "retail": _RETAIL_HEALTH_TABLES,
     }
     if domain not in sample_queries:
         raise GuardrailError(
@@ -468,7 +506,7 @@ def verify_warehouse_domain(domain: str) -> dict[str, Any]:
         "banking": "agg_accounts_daily",
         "finance": "agg_accounts_monthly",
         "insurance": "agg_policies_daily",
-        "retail": "agg_retail_orders_daily",
+        "retail": "gold_orders",
     }[domain]
     return {
         "status": "passed",
@@ -511,7 +549,7 @@ def _databricks_execute_many(
     try:
         catalog_name = databricks_domain_catalog(domain) if domain else settings.databricks_catalog
         schema_name = settings.databricks_domain_schema if domain else settings.databricks_schema
-        fetch_limit = settings.query_row_limit if row_limit is None else max(1, min(row_limit, 2000))
+        fetch_limit = effective_row_limit(row_limit)
         _validate_identifier(catalog_name, "DATABRICKS_CATALOG")
         _validate_identifier(schema_name, "DATABRICKS_SCHEMA")
         return _databricks_run(catalog_name, schema_name, queries, parameter_sets, fetch_limit)
@@ -529,6 +567,9 @@ def _databricks_run(
     parameter_sets: list[Mapping[str, Any]] | None,
     fetch_limit: int,
 ) -> list[list[dict[str, Any]]]:
+    # Every Databricks statement passes through here, so nothing leaves without the SQL policy,
+    # however it was built or whichever route it came by.
+    queries = [validate_sql(query, fetch_limit) for query in queries]
     # Sessions are only reused for the same workspace endpoint and namespace.
     namespace = (
         settings.databricks_server_hostname,
@@ -566,11 +607,19 @@ def _databricks_query(
         ServerOperationError = _NoServerOperationError
     label = f"{namespace[2]}.{namespace[3]}"
 
+    if not _databricks_breaker.allow():
+        raise GuardrailError(
+            "The Databricks warehouse is failing repeatedly, so the query was not sent. It will be retried shortly."
+        )
     for attempt in (1, 2):
         conn = _databricks_checkout(namespace)
         reused = conn is not None
         if conn is None:
-            conn = _databricks_open(namespace)
+            try:
+                conn = retry_call(_databricks_open, namespace)
+            except Exception:
+                _databricks_breaker.record_failure()
+                raise
         started = time.perf_counter()
         try:
             with conn.cursor() as cur:
@@ -585,18 +634,22 @@ def _databricks_query(
             # the session is still healthy, so keep it and do not retry.
             if "session" not in str(exc).lower():
                 _databricks_checkin(namespace, conn)
+                _databricks_breaker.record_success()
                 raise
             _close_quietly(conn)
             if not (reused and attempt == 1):
+                _databricks_breaker.record_failure()
                 raise
             logger.warning("Pooled Databricks session for %s expired; retrying on a new session", label)
         except Exception:
             _close_quietly(conn)
             if not (reused and attempt == 1):
+                _databricks_breaker.record_failure()
                 raise
             logger.warning("Pooled Databricks session for %s failed; retrying on a new session", label)
         else:
             _databricks_checkin(namespace, conn)
+            _databricks_breaker.record_success()
             elapsed_ms = (time.perf_counter() - started) * 1000
             log = logger.warning if elapsed_ms >= settings.slow_query_ms else logger.info
             log(
@@ -614,12 +667,18 @@ def _databricks_open(namespace: tuple[str, str, str, str]) -> Any:
         raise GuardrailError("Install databricks-sql-connector to use Databricks warehouse") from exc
     started = time.perf_counter()
     # catalog/schema set the session's initial namespace, replacing USE CATALOG/USE SCHEMA.
+    session_configuration = (
+        {"STATEMENT_TIMEOUT": str(settings.databricks_statement_timeout_seconds)}
+        if settings.databricks_statement_timeout_seconds > 0
+        else None
+    )
     conn = dbsql.connect(
         server_hostname=settings.databricks_server_hostname,
         http_path=_databricks_http_path(),
         access_token=settings.databricks_token,
         catalog=namespace[2],
         schema=namespace[3],
+        session_configuration=session_configuration,
     )
     logger.info("Opened Databricks session for %s.%s in %.0f ms", namespace[2], namespace[3], (time.perf_counter() - started) * 1000)
     return conn
@@ -664,6 +723,7 @@ def close_warehouse_sessions() -> None:
         _databricks_idle.clear()
     for conn in sessions:
         _close_quietly(conn)
+    _databricks_breaker.reset()
 
 
 def _snowflake_execute_many(
@@ -678,7 +738,7 @@ def _snowflake_execute_many(
     except ImportError as exc:
         raise GuardrailError("Install snowflake-connector-python to use Snowflake") from exc
     try:
-        fetch_limit = settings.query_row_limit if row_limit is None else max(1, min(row_limit, 2000))
+        fetch_limit = effective_row_limit(row_limit)
         with snowflake.connector.connect(
             account=settings.snowflake_account,
             user=settings.snowflake_user,

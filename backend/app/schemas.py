@@ -100,6 +100,10 @@ class QueryResponse(BaseModel):
     status: str = "complete"
     # Which engine actually handled each stage (planner, SQL, execution, prediction, synthesis).
     trace: list[dict[str, Any]] = Field(default_factory=list)
+    # What the answer rests on: its kind, sources, metric definition, period and row count.
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    # Plan allowance after this request: credits charged, percent used, new notices. Never provider quota.
+    usage: Optional[dict[str, Any]] = None
 
 
 class ReportPeriod(BaseModel):

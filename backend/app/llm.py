@@ -1,19 +1,24 @@
 
 import json
 import logging
+import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from openai import OpenAI
 from .config import settings
+from .services.reliability import BackpressureError, Bulkhead, CircuitBreaker, is_transient, retry_call
 
 logger = logging.getLogger(__name__)
 
 # Per-request record of which engine actually handled each Ask AI stage, so responses and
 # audits report the provider that produced the output rather than the configured one.
 _trace: ContextVar[list[dict[str, Any]] | None] = ContextVar("ryze_llm_trace", default=None)
+_call_info: ContextVar[dict[str, Any] | None] = ContextVar("ryze_llm_call_info", default=None)
+# Says why a stage may not use a model under the user's plan; None when it may.
+_usage_gate: ContextVar[Callable[[str], str | None] | None] = ContextVar("ryze_llm_usage_gate", default=None)
 
 
 @contextmanager
@@ -32,6 +37,7 @@ def record_step(
     ok: bool = True,
     detail: str | None = None,
     latency_ms: float | None = None,
+    **extra: Any,
 ) -> None:
     steps = _trace.get()
     if steps is None:
@@ -42,42 +48,67 @@ def record_step(
         "ok": ok,
         "detail": detail,
         "latency_ms": round(latency_ms) if latency_ms is not None else None,
+        **extra,
     })
 
 
-_TRANSIENT_ERRORS = {
-    "ServerError",
-    "InternalServerError",
-    "ServiceUnavailable",
-    "APIConnectionError",
-    "APITimeoutError",
-    "RateLimitError",
-    "TimeoutError",
-    "ConnectionError",
-    "ReadTimeout",
-    "ConnectTimeout",
-}
-_MAX_ATTEMPTS = 3
+@contextmanager
+def usage_gate(check: Callable[[str], str | None] | None) -> Iterator[None]:
+    token = _usage_gate.set(check)
+    try:
+        yield
+    finally:
+        _usage_gate.reset(token)
+
+
+def usage_refusal(stage: str) -> str | None:
+    check = _usage_gate.get()
+    return check(stage) if check is not None else None
+
+
+def _blocked_by_plan(stage: str) -> bool:
+    reason = usage_refusal(stage)
+    if reason:
+        record_step(stage, "plan allowance", ok=False, detail=reason, plan_blocked=True)
+    return bool(reason)
 
 
 def _call_with_retries(function: Any, *args: Any, **kwargs: Any) -> Any:
-    """Retry the same provider on transient failures (5xx, 429, timeouts). The provider is never
-    switched silently; a persistent failure is raised to the caller and recorded in the trace."""
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            return function(*args, **kwargs)
-        except Exception as exc:
-            text = str(exc)
-            # Exhausted quotas are not transient; retrying them only burns more calls.
-            transient = "RESOURCE_EXHAUSTED" not in text and "quota" not in text.lower() and (
-                type(exc).__name__ in _TRANSIENT_ERRORS
-                or any(marker in text for marker in ("503", "429", "overloaded", "UNAVAILABLE"))
-            )
-            if not transient or attempt == _MAX_ATTEMPTS:
-                raise
-            logger.warning("Transient %s from LLM provider; retrying (attempt %d)", type(exc).__name__, attempt + 1)
-            time.sleep(0.75 * attempt)
-    raise AssertionError("unreachable")
+    """Retry the same provider on transient failures (5xx, rate limits, timeouts), with jittered
+    backoff. Quota, key and validation failures are not retried; fallback happens in the caller."""
+
+    def on_retry(attempt: int, exc: Exception) -> None:
+        logger.warning("Transient %s from LLM provider; retrying (attempt %d)", type(exc).__name__, attempt + 1)
+        info = _call_info.get()
+        if info is not None:
+            info["retries"] = info.get("retries", 0) + 1
+
+    return retry_call(function, *args, on_retry=on_retry, **kwargs)
+
+
+def _note_usage(input_tokens: Any, output_tokens: Any, total_tokens: Any = None) -> None:
+    info = _call_info.get()
+    if info is not None and (input_tokens is not None or output_tokens is not None or total_tokens is not None):
+        info["input_tokens"] = input_tokens
+        info["output_tokens"] = output_tokens
+        # The provider's own total when it sends one: Gemini's includes thinking tokens.
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
+        info["total_tokens"] = total_tokens
+
+
+_RETRY_AFTER = re.compile(r"(?:retryDelay['\"]?\s*:\s*['\"]?|retry in\s+)(\d+)", re.IGNORECASE)
+
+
+def classify_provider_error(text: str) -> tuple[str | None, int | None]:
+    """Only an error that names a quota counts as exhausted: other 429s are capacity or rate limits."""
+    retry = _RETRY_AFTER.search(text)
+    retry_after = int(retry.group(1)) if retry else None
+    if "RESOURCE_EXHAUSTED" in text and "quota" in text.lower() or "exceeded your current quota" in text.lower():
+        return "quota_exhausted", retry_after
+    if "429" in text or "RESOURCE_EXHAUSTED" in text or "rate limit" in text.lower():
+        return "rate_limited", retry_after
+    return None, retry_after
 
 
 def last_failure(stage: str) -> str | None:
@@ -100,7 +131,8 @@ def _model_name(provider: str) -> str:
 
 def _record_llm(stage: str, provider: str | None, ok: bool, started: float, error: str | None = None) -> None:
     engine = f"{provider}:{_model_name(provider)}" if provider else "no LLM provider configured"
-    record_step(stage, engine, ok=ok, detail=error, latency_ms=(time.perf_counter() - started) * 1000)
+    extra = {key: value for key, value in (_call_info.get() or {}).items() if value}
+    record_step(stage, engine, ok=ok, detail=error, latency_ms=(time.perf_counter() - started) * 1000, **extra)
 
 
 def provider_status() -> dict[str, Any]:
@@ -215,6 +247,12 @@ def _google_message(
         config=types.GenerateContentConfig(**config_args),
     )
 
+    usage = getattr(response, "usage_metadata", None)
+    _note_usage(
+        getattr(usage, "prompt_token_count", None),
+        getattr(usage, "candidates_token_count", None),
+        getattr(usage, "total_token_count", None),
+    )
     return response.text or ""
 
 
@@ -245,6 +283,8 @@ def _anthropic_message(
         messages=[{"role": "user", "content": user}],
     )
 
+    usage = getattr(response, "usage", None)
+    _note_usage(getattr(usage, "input_tokens", None), getattr(usage, "output_tokens", None))
     return "".join(
         block.text
         for block in response.content
@@ -260,6 +300,8 @@ def llm_available(override: str | None = None) -> bool:
 # are skipped in favour of the fallback provider for a while instead of failing every call.
 _HARD_FAILURE_COOLDOWN_SECONDS = 600
 _unavailable_until: dict[str, float] = {}
+_breakers: dict[str, CircuitBreaker] = {}
+_bulkheads: dict[str, Bulkhead] = {}
 _HARD_FAILURE_MARKERS = ("RESOURCE_EXHAUSTED", "quota", "API_KEY_INVALID", "API key not valid", "PERMISSION_DENIED", "401", "403")
 
 
@@ -291,8 +333,37 @@ def _providers_for(override: str | None, stage: str) -> list[str]:
 
 def _note_failure(provider: str, exc: Exception) -> None:
     text = f"{type(exc).__name__}: {exc}"
+    info = _call_info.get()
+    if info is not None:
+        info["error_kind"], info["retry_after_seconds"] = classify_provider_error(text)
     if any(marker in text for marker in _HARD_FAILURE_MARKERS):
         _unavailable_until[provider] = time.monotonic() + _HARD_FAILURE_COOLDOWN_SECONDS
+    elif is_transient(exc):
+        _breaker(provider).record_failure()
+
+
+def _breaker(provider: str) -> CircuitBreaker:
+    return _breakers.setdefault(provider, CircuitBreaker(f"llm:{provider}"))
+
+
+def _attempt(function: Any, provider: str, system: str, user: str, stage: str) -> Any:
+    """One provider attempt behind its circuit breaker and concurrency limit."""
+    breaker = _breaker(provider)
+    engine = f"{provider}:{_model_name(provider)}"
+    if not breaker.allow():
+        record_step(stage, engine, ok=False, detail=f"Skipped: {provider} is failing repeatedly (circuit open).")
+        return None
+    _call_info.set({})
+    bulkhead = _bulkheads.setdefault(provider, Bulkhead(f"LLM provider {provider}", settings.llm_max_concurrency))
+    try:
+        with bulkhead.slot():
+            result = function(provider, system, user, stage)
+    except BackpressureError as exc:
+        record_step(stage, engine, ok=False, detail=str(exc))
+        return None
+    if result is not None:
+        breaker.record_success()
+    return result
 
 
 def failed_providers(stage: str) -> list[str]:
@@ -314,12 +385,14 @@ def complete_json(
     override: str | None = None,
     stage: str = "llm",
 ) -> dict[str, Any] | None:
+    if _blocked_by_plan(stage):
+        return None
     providers = _providers_for(override, stage)
     if not providers:
         _record_llm(stage, None, False, time.perf_counter(), "No LLM provider is configured for this request.")
         return None
     for provider in providers:
-        result = _complete_json_with(provider, system, user, stage)
+        result = _attempt(_complete_json_with, provider, system, user, stage)
         if result is not None:
             return result
     return None
@@ -358,6 +431,8 @@ def _complete_json_with(provider: str, system: str, user: str, stage: str) -> di
             kwargs["response_format"] = {"type": "json_object"}
 
             response = _call_with_retries(client.chat.completions.create, **kwargs)
+            usage = getattr(response, "usage", None)
+            _note_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
             content = response.choices[0].message.content or ""
 
         start = content.find("{")
@@ -393,12 +468,14 @@ def complete_text(
     override: str | None = None,
     stage: str = "llm",
 ) -> str | None:
+    if _blocked_by_plan(stage):
+        return None
     providers = _providers_for(override, stage)
     if not providers:
         _record_llm(stage, None, False, time.perf_counter(), "No LLM provider is configured for this request.")
         return None
     for provider in providers:
-        result = _complete_text_with(provider, system, user, stage)
+        result = _attempt(_complete_text_with, provider, system, user, stage)
         if result is not None:
             return result
     return None
@@ -422,6 +499,8 @@ def _complete_text_with(provider: str, system: str, user: str, stage: str) -> st
                     {"role": "user", "content": user},
                 ],
             )
+            usage = getattr(response, "usage", None)
+            _note_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
             content = response.choices[0].message.content
         if not content or not content.strip():
             _record_llm(stage, provider, False, started, "The model returned an empty response.")

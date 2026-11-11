@@ -1,10 +1,11 @@
 ﻿from datetime import date, datetime, timezone
 from functools import partial
 from random import Random
+import json
 import re
 import time
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlglot import exp, parse_one
@@ -15,11 +16,12 @@ from sqlalchemy.orm import Session
 from ..auth import AuthUser
 from ..config import settings
 from ..domains import DOMAIN_LABELS
-from ..llm import complete_text, record_step, trace_steps
+from ..llm import complete_text, record_step, trace_steps, usage_gate, usage_refusal
 from ..governance import build_lineage, chart_spec, extract_tables, guardrail_report, model_gov, source_tables
-from ..models import Claim, Customer, HitlReview, LiveEvent, Order, OrderItem, Product, QueryHistory
+from ..models import Claim, ConversationQueryState, Customer, HitlReview, LiveEvent, Order, OrderItem, Product, QueryHistory
 from ..schemas import PredictionPayload, QueryResponse, UncertaintyPayload
 from ..sensitive_data import (
+    redact_text,
     require_sensitive_request_access,
     require_sql_sensitive_access,
     requested_sensitive_type,
@@ -29,18 +31,36 @@ from ..warehouse import (
     databricks_domain_catalog,
     databricks_healthcare_tenant_catalog,
     execute_databricks_domain_batch,
+    execute_healthcare_tenant_readonly,
     execute_readonly,
     execute_readonly_batch,
 )
 from .context_graph import ContextGraphService
 from .feature_builder import build_features, build_forecast
-from .guardrail import GuardrailError
+from .knowledge import format_knowledge_answer
+from .metrics import format_metric_answer
+from .observability import current_request_id, observe_request
+from . import subscriptions
+from .planner import is_reference_question, route_question
+from .banking_agent import AgentResult, BankingAgent
+from .banking_query import QueryPlan
+from .banking_registry import APPROVED_TABLES as BANKING_APPROVED_TABLES
+from .banking_registry import BANKING, DomainRegistry
+from .domain_registries import REGISTRIES
+from .banking_registry import supported_summary as banking_supported_summary
+from .banking_registry import values_named_in as banking_values_named_in
+from .policy import detect_prompt_injection, normalize_input, other_domain_named
+from .sql_policy import REGENERABLE, USER_MESSAGES, classify_sql_error, enforce_select_policy
+from .reliability import CircuitBreaker, DeadlineExceededError, check_deadline, request_deadline
+from .guardrail import GuardrailError, validate_sql
 from .assistant_graph import BusinessAssistantGraph
+from .baseline_forecast import baseline_forecast
 from .schema_rag import SchemaRagError
 from .sql_generator import generate_sql
 from .synthesis import synthesize
 from .tabpfn_service import ModelUnavailableError, TabPFNService
 from .tenant_scope import scope_healthcare_sql
+from .tools import ToolContext, invoke_tool
 from .reports import RETAIL_NET_SALES
 
 RISK_RATIO_DEFINITIONS = {
@@ -57,10 +77,10 @@ RISK_RATIO_DEFINITIONS = {
         "denominator_label": "Gross trade notional",
     },
     "insurance": {
-        "label": "Insurance loss ratio",
-        "description": "Insurance claims divided by earned premium.",
-        "numerator_label": "Claims",
-        "denominator_label": "Premium",
+        "label": "Claimed amount to written premium",
+        "description": "All claimed amounts divided by non-cancelled written premium. Not an earned-premium loss ratio.",
+        "numerator_label": "Claimed amount",
+        "denominator_label": "Written premium",
     },
     "healthcare": {
         "label": "Approved claim amount rate",
@@ -102,6 +122,7 @@ _QUERY_MEASURE_PATTERNS = {
 }
 
 
+_FAILURE_STATUS = {"permission_denied": 403, "timeout": 504, "infrastructure": 503}
 _LLM_PROVIDERS = {"google", "openai", "grok", "anthropic", "ollama"}
 _ABOUT_ASSISTANT = (
     "This is the RYZE AI/BI governed business assistant. Ask questions in plain language about your "
@@ -127,6 +148,26 @@ def _source_label(domain: str) -> str:
     return settings.warehouse
 
 
+def _application_answer(tool: str, data: Any) -> str:
+    if tool == "postgres.my_reviews":
+        if not data:
+            return "You have no human-review requests."
+        return "Your review requests: " + "; ".join(
+            f"{row['audit_id']} ({row['reason']}): {row['status']}" for row in data
+        ) + "."
+    if tool == "postgres.my_conversations":
+        if not data:
+            return "You have no saved conversations in this domain."
+        return "Your recent conversations: " + "; ".join(f"“{row['title']}”" for row in data) + "."
+    authorized = [item["label"] for item in data["domains"] if item["authorized"]]
+    pending = [item["label"] for item in data["domains"] if item["pending_request"]]
+    role = "an administrator" if data["role"] == "admin" else "a business user"
+    answer = f"You are signed in as {role} with access to: {', '.join(authorized)}."
+    if pending:
+        answer += f" Pending access requests: {', '.join(pending)}."
+    return answer
+
+
 def _is_empty_result(table: list[dict[str, Any]]) -> bool:
     """True when nothing was found: no rows, or one aggregate row of only zeros/NULLs."""
     if not table:
@@ -144,11 +185,12 @@ def _forecast_answer(
     forecast: dict[str, Any],
     prediction: PredictionPayload,
     uncertainty: UncertaintyPayload,
+    model: str = "self-hosted TabPFN model",
 ) -> str:
     low, high = uncertainty.confidence_range
     target = str(forecast["target"]).replace("_", " ")
     return (
-        f"Prediction (self-hosted TabPFN model output, not actual data): {target} for "
+        f"Prediction ({model} output, not actual data): {target} for "
         f"{forecast['next_period']} is projected at {prediction.values[0]:,.2f}, with an 80% range of "
         f"{low:,.2f} to {high:,.2f}. Actual history used: {forecast['periods']} {forecast['frequency']} "
         f"periods from {forecast['history_start']} to {forecast['history_end']}; the latest actual value was "
@@ -415,6 +457,33 @@ def _build_risk_ratio_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return risk_rows
+
+
+# agg_accounts_* group each account's current balance by the date it opened. No balance history
+# exists in finance.gold, so these panels must not read as balance movement over time.
+_FINANCE_DASHBOARD_TEXT = {
+    "metric_description": "Cash balance of all accounts: active, dormant and closed",
+    "active_cash_balance_description": "Cash balance of accounts with status ACTIVE only",
+    "event_label": "Accounts",
+    "event_description": "Accounts of every status",
+    "trend_title": "Account openings",
+    "trend_description": "Grouped by the month accounts opened; not a history of balances",
+    "trend_value_label": "Current cash balance, by opening month",
+    "trend_event_label": "Accounts opened",
+    "live_title": "Recent account openings",
+    "live_description": "Current balance of accounts, by most recent opening date",
+    "live_section_title": "Latest opening dates",
+}
+
+
+def _registry_for(domain: str, admin_sensitive_request: bool) -> DomainRegistry | None:
+    """The approved registry that answers this domain first, if it is switched on."""
+    enabled = {item.strip() for item in settings.metric_registry_domains.split(",") if item.strip()}
+    if not settings.ask_ai_agentic_routing or admin_sensitive_request or domain not in enabled:
+        return None
+    if domain == "healthcare" and settings.warehouse != "databricks":
+        return None
+    return REGISTRIES.get(domain)
 
 
 def _databricks_dashboard_queries(domain: str) -> list[str]:
@@ -686,15 +755,17 @@ def _databricks_dashboard_queries(domain: str) -> list[str]:
         catalog = databricks_domain_catalog(domain)
         qualified_catalog = f"`{catalog}`"
         return [
-            # 1. Latest verified account balance aggregate
+            # 1. Current cash balance and number of accounts, every status included. Rows group
+            # accounts by the month they opened, so the total needs all rows, not the latest.
             f"""
-                SELECT COALESCE(total_balance, 0) AS volume,
-                       COALESCE(record_count, 0) AS events
+                SELECT COALESCE(SUM(total_cash_balance), 0) AS volume,
+                       COALESCE(SUM(record_count), 0) AS events,
+                       (
+                           SELECT COALESCE(SUM(cash_balance), 0)
+                           FROM {qualified_catalog}.gold.gold_accounts
+                           WHERE status = 'ACTIVE'
+                       ) AS active_cash_balance
                 FROM {qualified_catalog}.gold.agg_accounts_monthly
-                WHERE _gold_month = (
-                    SELECT MAX(_gold_month)
-                    FROM {qualified_catalog}.gold.agg_accounts_monthly
-                )
             """,
 
             # 2. Customer/churn metrics are not available in the
@@ -719,19 +790,19 @@ def _databricks_dashboard_queries(domain: str) -> list[str]:
                 WHERE 1 = 0
             """,
 
-            # 5. Monthly account balance trend
+            # 5. Current balance of the accounts opened in each month
             f"""
                 SELECT _gold_month AS label,
-                       COALESCE(total_balance, 0) AS value,
+                       COALESCE(total_cash_balance, 0) AS value,
                        COALESCE(record_count, 0) AS events
                 FROM {qualified_catalog}.gold.agg_accounts_monthly
                 ORDER BY _gold_month
             """,
 
-            # 6. Recent daily account balance aggregates
+            # 6. Most recent days on which accounts were opened
             f"""
-                SELECT 'Daily account balance' AS label,
-                       COALESCE(total_balance, 0) AS value,
+                SELECT 'Balance of accounts opened' AS label,
+                       COALESCE(total_cash_balance, 0) AS value,
                        CAST(_gold_date AS TIMESTAMP) AS created_at
                 FROM {qualified_catalog}.gold.agg_accounts_daily
                 ORDER BY _gold_date DESC
@@ -863,6 +934,8 @@ class Orchestrator:
         self.assistant = BusinessAssistantGraph(self.graph)
         self.tabpfn = TabPFNService()
         self._ready = False
+        # After a load failure, skip TabPFN for a while instead of retrying its download per question.
+        self._tabpfn_breaker = CircuitBreaker("tabpfn", failure_threshold=1, reset_seconds=600)
 
     def warmup(self, db: Session) -> None:
         self.graph.rebuild(db)
@@ -879,18 +952,56 @@ class Orchestrator:
         conversation_id: UUID | None = None,
         approved_review: HitlReview | None = None,
     ) -> QueryResponse:
-        with trace_steps() as steps:
-            return self._run(
-                db,
-                question,
-                user,
-                llm_override,
-                persist_history,
-                conversation_context,
-                conversation_id,
-                approved_review,
-                steps,
-            )
+        started = time.perf_counter()
+        status = "error"
+        route = None
+        audit_id = None
+        gate = subscriptions.open_gate(db, user)
+        # Without a plan's limit, context stays at the size it has always been.
+        context_limit = gate.context_limit if gate is not None and not gate.exempt else 12
+        if conversation_context is not None:
+            conversation_context = conversation_context[-context_limit:] if context_limit else []
+        with trace_steps() as steps, request_deadline(settings.ask_deadline_seconds), usage_gate(gate.refusal if gate else None):
+            try:
+                subscriptions.require_no_refusal(subscriptions.provider_refusal(db, gate, llm_override))
+                response = self._run(
+                    db,
+                    question,
+                    user,
+                    llm_override,
+                    persist_history,
+                    conversation_context,
+                    conversation_id,
+                    approved_review,
+                    steps,
+                )
+                status, route, audit_id = response.status, response.plan.get("route"), response.audit_id
+                response.usage = subscriptions.settle(
+                    db, user, gate, steps, status=response.status, made_prediction=response.prediction is not None, audit_id=audit_id,
+                )
+                return response
+            except DeadlineExceededError as exc:
+                status = "deadline_exceeded"
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except HTTPException as exc:
+                status = f"http_{exc.status_code}"
+                # The request failed because the plan stopped a model call, not for its stated reason.
+                blocked = next((step.get("detail") for step in steps if step.get("plan_blocked")), None)
+                if blocked and exc.status_code in {422, 503}:
+                    raise HTTPException(status_code=402, detail=blocked) from exc
+                raise
+            finally:
+                subscriptions.record_llm_events(db, user, steps, request_id=current_request_id.get(), audit_id=audit_id)
+                observe_request(
+                    audit_id=audit_id,
+                    conversation_id=conversation_id,
+                    username=user.username,
+                    domain=user.domain,
+                    route=route,
+                    status=status,
+                    trace=steps,
+                    duration_seconds=time.perf_counter() - started,
+                )
 
     def _run(
         self,
@@ -904,6 +1015,41 @@ class Orchestrator:
         approved_review: HitlReview | None,
         steps: list[dict[str, Any]],
     ) -> QueryResponse:
+        # Sensitive values typed into a question never reach an LLM, history or logs.
+        question = redact_text(normalize_input(question))
+        if detect_prompt_injection(question):
+            record_step("input_policy", "prompt-injection check", ok=False, detail="Request refused")
+            raise HTTPException(
+                status_code=400,
+                detail="This request tries to change the assistant's instructions or controls, so it was not run. "
+                "Ask a business question instead.",
+            )
+        named_domain = other_domain_named(question, user.domain)
+        if named_domain:
+            record_step("input_policy", "domain scope check", ok=False, detail="Request refused")
+            raise HTTPException(
+                status_code=422,
+                detail=f"{named_domain.title()} data is outside the authorized {user.domain} source. "
+                "No query was run. If you have access, switch to that domain and ask again.",
+            )
+        # Refusals and registry answers need no schema metadata, so they hold during an outage.
+        require_sensitive_request_access(question, user.role)
+        admin_sensitive_request = (
+            user.role == "admin" and requested_sensitive_type(question) == "admin_only"
+        )
+        banking_workflow = (
+            user.domain == "banking"
+            and settings.ask_ai_agentic_routing
+            and settings.banking_agent_enabled
+            and not admin_sensitive_request
+        )
+        registry = BANKING if banking_workflow else _registry_for(user.domain, admin_sensitive_request)
+        if registry is not None and not is_reference_question(question):
+            answered = self._banking_answer(
+                db, question, user, llm_override, persist_history, conversation_id, approved_review, steps, registry,
+            )
+            if answered is not None:
+                return answered
         if not self._ready:
             try:
                 self.warmup(db)
@@ -918,10 +1064,6 @@ class Orchestrator:
                     ),
                 ) from exc
 
-        require_sensitive_request_access(question, user.role)
-        admin_sensitive_request = (
-            user.role == "admin" and requested_sensitive_type(question) == "admin_only"
-        )
         if admin_sensitive_request:
             try:
                 self.graph.refresh_warehouse_schema()
@@ -945,7 +1087,7 @@ class Orchestrator:
             ) from exc
         plan = assistant_state["plan"]
         schema_ctx = assistant_state["schema_context"]
-        audit_id = f"AU-{int(datetime.utcnow().timestamp()) % 100000:04d}"
+        audit_id = f"AU-{uuid4().hex[:12].upper()}"
         # A follow-up rewritten by the planner names its metric and period explicitly.
         resolved_question = plan.get("standalone_question") or question
         respond = partial(
@@ -989,6 +1131,11 @@ class Orchestrator:
                 guardrail_ok=True,
                 error=None,
             )
+        routed = self._answer_from_route(
+            db, resolved_question, user, plan, schema_ctx, respond,
+        )
+        if routed is not None:
+            return routed
         if user.domain == "healthcare" and plan.get("is_prediction"):
             raise HTTPException(
                 status_code=422,
@@ -997,33 +1144,77 @@ class Orchestrator:
                     "cohort policy, and governance review are configured."
                 ),
             )
-        try:
-            sql = generate_sql(
-                resolved_question,
-                schema_ctx,
-                bool(plan.get("is_prediction")),
-                user.domain,
-                llm_override,
-                role=user.role,
-                conversation_context=conversation_context,
+        if registry is not None and registry is not BANKING and not settings.registry_generated_sql:
+            record_step("router", f"{registry.label} metric registry", detail="Outside the approved metrics; no SQL generated")
+            return respond(
+                answer=(
+                    f"That question is outside the approved {registry.label} measures, so no query was run. "
+                    f"Approved measures are: {registry.supported_summary()}. Each can be filtered and broken down "
+                    "by the categories it lists, and dated measures by period."
+                ),
+                status="insufficient_data",
+                sql=None,
+                table=[],
+                guardrail_ok=True,
+                error=None,
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _validate_query_sources(sql, schema_ctx, user.domain)
-        _validate_query_columns(sql, schema_ctx, user.domain)
-        _validate_query_relevance(resolved_question, sql, user.domain)
-        if user.domain == "healthcare":
+        if banking_workflow and not settings.banking_generated_sql:
+            record_step("router", "banking metric registry", detail="Outside the approved metrics; no SQL generated")
+            return respond(
+                answer=(
+                    "This question is outside the approved banking metrics, so no query was run and no figure is reported. "
+                    f"Approved measures are: {banking_supported_summary()}. Each can be filtered and broken down, "
+                    "and dated measures can be trended and compared."
+                ),
+                status="insufficient_data",
+                sql=None,
+                table=[],
+                guardrail_ok=True,
+                error=None,
+                evidence={"kind": "registry", "sources": ["banking metric registry"], "row_count": 0},
+            )
+        check_deadline("SQL generation")
+        fetched = None
+        if banking_workflow:
+            schema_ctx = {
+                **schema_ctx,
+                "tables": {name: columns for name, columns in schema_ctx.get("tables", {}).items() if name.lower() in BANKING_APPROVED_TABLES},
+            }
+            sql, fetched = self._generated_banking_query(
+                resolved_question, schema_ctx, plan, user, llm_override, conversation_context,
+            )
+        else:
             try:
-                sql = scope_healthcare_sql(sql, user.tenant_id, schema_ctx)
-            except GuardrailError as exc:
+                sql = generate_sql(
+                    resolved_question,
+                    schema_ctx,
+                    bool(plan.get("is_prediction")),
+                    user.domain,
+                    llm_override,
+                    role=user.role,
+                    conversation_context=conversation_context,
+                )
+            except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-        require_sql_sensitive_access(sql, user.role)
-        record_step("sql_validation", "read-only, authorized sources and columns, sensitive fields")
+            _validate_query_sources(sql, schema_ctx, user.domain)
+            _validate_query_columns(sql, schema_ctx, user.domain)
+            _validate_query_relevance(resolved_question, sql, user.domain)
+            if user.domain == "healthcare":
+                try:
+                    sql = scope_healthcare_sql(sql, user.tenant_id, schema_ctx)
+                except GuardrailError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+            require_sql_sensitive_access(sql, user.role)
+            record_step("sql_validation", "read-only, authorized sources and columns, sensitive fields")
 
+        check_deadline("query execution")
         started = time.perf_counter()
         source_label = _source_label(user.domain)
         try:
-            table = sanitize_sensitive_rows(execute_readonly(sql, user.domain), user.role)
+            table = sanitize_sensitive_rows(
+                fetched if fetched is not None else execute_readonly(sql, user.domain),
+                user.role,
+            )
             guardrail_ok = True
             error = None
             record_step(
@@ -1056,6 +1247,7 @@ class Orchestrator:
         uncertainty = None
         hitl = None
         if plan.get("is_prediction"):
+            subscriptions.require_no_refusal(usage_refusal("forecasting"))
             if approved_review is None and user.role != "admin" and settings.hitl_prediction_review:
                 review = HitlReview(
                     audit_id=audit_id,
@@ -1088,9 +1280,8 @@ class Orchestrator:
             try:
                 forecast = build_forecast(resolved_question, table)
                 if forecast is not None:
-                    prediction, uncertainty = self.tabpfn.forecast(forecast)
-                    record_step("prediction", "self-hosted TabPFNRegressor (next-period forecast)")
-                    answer = _forecast_answer(forecast, prediction, uncertainty)
+                    prediction, uncertainty, model = self._forecast(forecast)
+                    answer = _forecast_answer(forecast, prediction, uncertainty, model)
                 else:
                     prepared = build_features(resolved_question, table)
                     prediction, uncertainty = self.tabpfn.predict(prepared)
@@ -1142,6 +1333,7 @@ class Orchestrator:
                     hitl=hitl,
                 )
 
+        check_deadline("answer generation")
         answer = synthesize(
             question,
             table,
@@ -1186,7 +1378,10 @@ class Orchestrator:
         prediction: PredictionPayload | None = None,
         uncertainty: UncertaintyPayload | None = None,
         hitl: dict[str, Any] | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> QueryResponse:
+        # Applies to every answer path, so no model or message can emit a raw sensitive value.
+        answer = redact_text(answer, user.role)
         schema_used = list(schema_ctx.get("tables", {}).keys())
         if settings.warehouse in {"databricks", "snowflake"}:
             counts = {}
@@ -1254,6 +1449,12 @@ class Orchestrator:
             conversation_id=conversation_id,
             status=status,
             trace=list(steps),
+            evidence=evidence or {
+                "kind": "prediction" if prediction is not None else ("warehouse" if sql else "none"),
+                "sources": extract_tables(sql),
+                "row_count": len(table),
+                "observed_rows_are_actual_data": bool(sql),
+            },
         )
         if persist_history:
             db.add(
@@ -1273,6 +1474,308 @@ class Orchestrator:
             )
             db.commit()
         return response
+
+    def _generated_banking_query(
+        self,
+        question: str,
+        schema_ctx: dict[str, Any],
+        plan: dict[str, Any],
+        user: AuthUser,
+        llm_override: str | None,
+        conversation_context: list[dict[str, str]] | None,
+    ) -> tuple[str, list[dict[str, Any]] | None]:
+        """Generated SQL under the parsed policy, with one more attempt if the query itself was wrong.
+
+        A permission denial, timeout or outage is not retried here, and the second attempt passes
+        every check again. Returns the SQL and its rows, or raises.
+        """
+        request = question
+        for attempt in (1, 2):
+            try:
+                sql = generate_sql(
+                    request,
+                    schema_ctx,
+                    bool(plan.get("is_prediction")),
+                    user.domain,
+                    llm_override,
+                    role=user.role,
+                    conversation_context=conversation_context,
+                )
+                _validate_query_sources(sql, schema_ctx, user.domain)
+                _validate_query_columns(sql, schema_ctx, user.domain)
+                _validate_query_relevance(question, sql, user.domain)
+                sql = validate_sql(sql)
+                enforce_select_policy(sql, BANKING_APPROVED_TABLES, "banking", "gold")
+                # Validation cannot tell if SQL answers the question, but a named value must appear.
+                dropped = [value for value in banking_values_named_in(question) if value.lower() not in sql.lower()]
+                if dropped:
+                    raise ValueError(f"The query ignored {', '.join(dropped)} from the question.")
+            except (ValueError, HTTPException) as exc:
+                reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                record_step("sql_validation", "SQL policy", ok=False, detail=str(reason)[:200])
+                if attempt == 2:
+                    raise HTTPException(status_code=422, detail=str(reason)) from exc
+                request = f"{question}\n\nA previous query was rejected: {reason} Use only the listed tables and columns."
+                continue
+            require_sql_sensitive_access(sql, user.role)
+            record_step("sql_validation", "parsed SQL policy, authorized sources and columns, sensitive fields")
+            try:
+                return sql, execute_readonly(sql, user.domain)
+            except GuardrailError as exc:
+                kind = classify_sql_error(str(exc))
+                record_step("sql_execution", _source_label(user.domain), ok=False, detail=kind)
+                if kind not in REGENERABLE or attempt == 2:
+                    raise HTTPException(
+                        status_code=_FAILURE_STATUS.get(kind, 422),
+                        detail=USER_MESSAGES.get(kind, str(exc)),
+                    ) from exc
+                request = f"{question}\n\nThe warehouse rejected a previous query: {str(exc)[:300]} Correct it."
+        raise AssertionError("unreachable")
+
+    def _banking_answer(
+        self,
+        db: Session,
+        question: str,
+        user: AuthUser,
+        llm_override: str | None,
+        persist_history: bool,
+        conversation_id: UUID | None,
+        approved_review: HitlReview | None,
+        steps: list[dict[str, Any]],
+        registry: DomainRegistry = BANKING,
+    ) -> QueryResponse | None:
+        """Answer from a domain's registry workflow, or None to continue with the general path."""
+        state = None
+        previous = None
+        if conversation_id is not None:
+            state = db.get(ConversationQueryState, str(conversation_id))
+            if state is not None:
+                previous = QueryPlan.from_dict(json.loads(state.plan_json))
+                # A plan saved under another registry is not a follow-up to this one.
+                if registry.metric(previous.metric_id) is None:
+                    previous = None
+        if registry.domain == "healthcare":
+            execute = lambda sql, domain, parameters, limit: execute_healthcare_tenant_readonly(sql, user.tenant_id, parameters, limit)  # noqa: E731
+        else:
+            execute = lambda sql, domain, parameters, limit: execute_readonly(sql, domain, parameters, limit)  # noqa: E731
+        agent = BankingAgent(execute, registry, scope=user.tenant_id or "")
+        result: AgentResult | None = agent.run(question, user, previous, llm_override, approved_review is not None)
+        if result is None:
+            return None
+        # The same contract as the general path when the warehouse cannot be reached.
+        if result.error == "infrastructure":
+            raise HTTPException(status_code=503, detail=result.answer)
+        if result.plan is not None and result.plan.intent == "forecast":
+            subscriptions.require_no_refusal(usage_refusal("forecasting"))
+        audit_id = f"AU-{uuid4().hex[:12].upper()}"
+        plan = {
+            "intent": result.plan.intent if result.plan else "unsupported",
+            "route": result.route,
+            "is_prediction": result.route == "prediction",
+            "query_plan": result.plan.to_dict() if result.plan else None,
+        }
+        hitl = None
+        answer = result.answer
+        if result.needs_review:
+            review = HitlReview(
+                audit_id=audit_id,
+                username=user.username,
+                domain=user.domain,
+                tenant_id=user.tenant_id,
+                question=question,
+                status="pending",
+                reason="prediction",
+                conversation_id=str(conversation_id) if conversation_id else None,
+            )
+            if persist_history:
+                db.add(review)
+                db.flush()
+            hitl = {"status": "pending", "audit_id": audit_id, "review_id": review.id, "reason": "prediction"}
+            history = result.evidence["history"]
+            answer = (
+                f"A forecast of {result.plan.metric.label.lower()} can be produced from {history['periods']} complete months "
+                f"({history['first']} to {history['last']}). Forecasts for business users are released only after an administrator "
+                f"approves them, so none has been run. Review {audit_id} is pending; the history is shown below. "
+                "After approval, choose “Run approved prediction” to continue."
+            )
+        elif result.prediction is not None:
+            hitl = (
+                {
+                    "status": "approved",
+                    "audit_id": approved_review.audit_id,
+                    "review_id": approved_review.id,
+                    "reason": "prediction",
+                    "reviewed_by": approved_review.reviewed_by,
+                }
+                if approved_review is not None
+                else {"status": "not_required", "audit_id": audit_id, "reason": "administrator request"}
+            )
+        if result.plan is not None and conversation_id is not None and persist_history:
+            plan_json = json.dumps(result.plan.to_dict())
+            if state is None:
+                db.add(ConversationQueryState(conversation_id=str(conversation_id), plan_json=plan_json))
+            else:
+                state.plan_json = plan_json
+                state.updated_at = datetime.utcnow()
+        return self._respond(
+            db,
+            user=user,
+            question=question,
+            plan=plan,
+            schema_ctx={"tables": {source.split(".")[-1]: [] for source in result.evidence.get("sources", []) if "." in source}},
+            steps=steps,
+            audit_id=audit_id,
+            persist_history=persist_history,
+            conversation_id=conversation_id,
+            answer=answer,
+            status=result.status,
+            sql=result.sql,
+            table=result.table,
+            guardrail_ok=result.guardrail_ok,
+            error=result.error,
+            prediction=result.prediction,
+            uncertainty=result.uncertainty,
+            hitl=hitl,
+            evidence=result.evidence,
+        )
+
+    def _forecast(self, forecast: dict[str, Any]) -> tuple[PredictionPayload, UncertaintyPayload, str]:
+        """TabPFN when configured and loadable; otherwise the backtested baseline, named as such."""
+        engine = settings.prediction_engine
+        if engine != "baseline" and (engine == "tabpfn" or self._tabpfn_breaker.allow()):
+            try:
+                prediction, uncertainty = self.tabpfn.forecast(forecast)
+                self._tabpfn_breaker.record_success()
+                record_step("prediction", "self-hosted TabPFNRegressor (next-period forecast)")
+                return prediction, uncertainty, "self-hosted TabPFN model"
+            except Exception as exc:
+                if engine == "tabpfn":
+                    raise
+                self._tabpfn_breaker.record_failure()
+                record_step("prediction", "self-hosted TabPFN", ok=False, detail=f"Unavailable ({type(exc).__name__}); using the statistical baseline.")
+        prediction, uncertainty, details = baseline_forecast(forecast)
+        record_step(
+            "prediction",
+            details["model"],
+            detail=f"Backtest over {details['backtest_periods']} periods: mean absolute error {details['backtest_mean_absolute_error']:,.2f}",
+        )
+        return prediction, uncertainty, details["model"]
+
+    def _answer_from_route(
+        self,
+        db: Session,
+        question: str,
+        user: AuthUser,
+        plan: dict[str, Any],
+        schema_ctx: dict[str, Any],
+        respond: Any,
+    ) -> QueryResponse | None:
+        """Answer from a governed tool when the question belongs to one; None continues to SQL."""
+        route = route_question(question, plan) if settings.ask_ai_agentic_routing else "databricks"
+        plan["route"] = route
+        record_step("router", route)
+        context = ToolContext(
+            db,
+            user,
+            schema_ctx.get("tables", {}),
+            execute=lambda sql, domain, parameters, limit: execute_readonly(sql, domain, parameters, limit),
+        )
+        no_sql = {"sql": None, "table": [], "guardrail_ok": True}
+        if route == "application":
+            lowered = question.lower()
+            if re.search(r"review|approval", lowered):
+                tool = "postgres.my_reviews"
+            elif re.search(r"conversation|history|asked", lowered):
+                tool = "postgres.my_conversations"
+            else:
+                tool = "postgres.my_access"
+            result = invoke_tool(tool, {}, context)
+            if not result.ok:
+                return respond(answer=result.error, status="error", error=result.error, **no_sql)
+            return respond(
+                answer=_application_answer(tool, result.data),
+                status="complete",
+                error=None,
+                evidence={"kind": "application", "sources": [tool], "row_count": None},
+                **no_sql,
+            )
+        if route == "knowledge":
+            result = invoke_tool("knowledge.search", {"query": question[:500]}, context)
+            if not result.ok:
+                return respond(answer=result.error, status="error", error=result.error, **no_sql)
+            if not result.data:
+                return respond(
+                    answer=(
+                        "I could not find an approved definition for that in the knowledge base, so I cannot verify "
+                        "an answer. An administrator can add the approved definition."
+                    ),
+                    status="insufficient_data",
+                    error=None,
+                    evidence={"kind": "knowledge", "sources": [], "row_count": 0},
+                    **no_sql,
+                )
+            return respond(
+                answer=format_knowledge_answer(result.data),
+                status="complete",
+                error=None,
+                evidence={
+                    "kind": "knowledge",
+                    "sources": [
+                        {"source": hit["source"], "version": hit["version"], "confidence": hit["confidence"]}
+                        for hit in result.data
+                    ],
+                    "row_count": len(result.data),
+                },
+                **no_sql,
+            )
+        if route != "metric":
+            return None
+        result = invoke_tool("metrics.calculate", {"question": question[:2000]}, context)
+        if not result.ok:
+            return respond(answer=result.error, status="error", error=result.error, **no_sql)
+        data = result.data
+        if not data.get("matched"):
+            plan["route"] = "databricks"
+            return None
+        if data.get("refusal"):
+            return respond(
+                answer=data["refusal"],
+                status="insufficient_data",
+                error=None,
+                evidence={"kind": "metric", "sources": ["metric registry"], "row_count": 0},
+                **no_sql,
+            )
+        evidence = {
+            "kind": "metric",
+            "metric": data["metric"],
+            "formula": data["formula"],
+            "filters": data["filters"],
+            "period": data["period"],
+            "sources": data["sources"],
+            "row_count": data["records"],
+        }
+        if data["value"] is None:
+            return respond(
+                answer=(
+                    f"The query matched no records for {data['label'].lower()} in {data['period']}, so there is no value to report."
+                    + self._availability_note(data["sql"], schema_ctx, user)
+                ),
+                status="no_data",
+                sql=data["sql"],
+                table=[],
+                guardrail_ok=True,
+                error=None,
+                evidence=evidence,
+            )
+        return respond(
+            answer=format_metric_answer(data),
+            status="complete",
+            sql=data["sql"],
+            table=[{"metric": data["label"], "period": data["period"], "value": data["value"], "records": data["records"]}],
+            guardrail_ok=True,
+            error=None,
+            evidence=evidence,
+        )
 
     @staticmethod
     def _general_answer(question: str, llm_override: str | None) -> str:
@@ -1859,12 +2362,20 @@ class Orchestrator:
             "domain_label": DOMAIN_LABELS[domain],
             "metric_name": {
                 "banking": "Deposits / flow",
-                "finance": "AUM / notional",
+                "finance": "Total cash balance" if settings.warehouse == "databricks" else "AUM / notional",
                 "insurance": "Gross written premium",
                 "retail": "Revenue",
             }.get(domain, "Revenue"),
             "volume": volume,
             "events": int(overview[0]["events"] or 0) if overview else 0,
+            **(
+                {
+                    **_FINANCE_DASHBOARD_TEXT,
+                    "active_cash_balance": float(overview[0]["active_cash_balance"] or 0) if overview else None,
+                }
+                if domain == "finance" and settings.warehouse == "databricks"
+                else {}
+            ),
             # None means the source has no such metric; the UI shows "Not available", never 0.
             "customers": (
                 int(customers_row["customers"]) if customers_row.get("customers") is not None else None

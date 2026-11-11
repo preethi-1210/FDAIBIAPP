@@ -68,6 +68,37 @@ class LocalTTLCache:
             self._entries[key] = (now + ttl_seconds, value)
 
 
+_local_rate_windows: dict[str, tuple[int, float]] = {}
+_local_rate_lock = Lock()
+
+
+def rate_limit_exceeded(scope: str, identity: str, limit: int, window_seconds: int = 60) -> bool:
+    """Count one request in a fixed window. Shared through the cache when it is available; if it
+    is not, each API process enforces the limit locally rather than dropping it."""
+    if limit <= 0:
+        return False
+    key = scoped_key("ratelimit", {"scope": scope, "identity": identity})
+    client = _get_client()
+    if client is not None:
+        try:
+            count = client.incr(key)
+            if count == 1:
+                client.expire(key, window_seconds)
+            return count > limit
+        except (RedisError, OSError):
+            logger.warning("Rate-limit cache unavailable; using the in-process counter")
+    now = time.monotonic()
+    with _local_rate_lock:
+        if len(_local_rate_windows) > 10000:
+            for stale in [k for k, (_count, ends) in _local_rate_windows.items() if ends <= now]:
+                del _local_rate_windows[stale]
+        count, ends = _local_rate_windows.get(key, (0, now + window_seconds))
+        if ends <= now:
+            count, ends = 0, now + window_seconds
+        _local_rate_windows[key] = (count + 1, ends)
+        return count + 1 > limit
+
+
 def scoped_key(namespace: str, scope: dict[str, Any]) -> str:
     serialized = json.dumps(scope, sort_keys=True, separators=(",", ":"), default=str)
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()

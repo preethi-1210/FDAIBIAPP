@@ -7,6 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..domains import finance_gold_glossary
 from ..warehouse import warehouse_schema_columns, warehouse_status
 from .schema_rag import SchemaRagError, SchemaRagService
 
@@ -53,6 +54,8 @@ class ContextGraphService:
             text("SELECT domain, business_term, table_name, column_name, description FROM glossary")
         ).mappings()
         self.glossary = [dict(r) for r in rows]
+        if settings.warehouse == "databricks":
+            self.glossary = [g for g in self.glossary if g.get("domain") != "finance"] + finance_gold_glossary()
         if settings.warehouse in {"databricks", "snowflake"} and warehouse_status()["ready"]:
             if settings.warehouse == "databricks":
                 self.graph.clear()
@@ -90,7 +93,12 @@ class ContextGraphService:
         else:
             tables = self.domain_tables.get(domain or "", self.tables)
         matched_tables: set[str] = set()
-        retrieved = self.rag.retrieve(retrieval_text or question, domain) if domain else []
+        try:
+            retrieved = self.rag.retrieve(retrieval_text or question, domain) if domain else []
+        except SchemaRagError:
+            # Embeddings are optional here; name and glossary matching still selects tables.
+            logger.warning("Schema retrieval unavailable; using keyword matching", exc_info=True)
+            retrieved = []
         for document in retrieved:
             table = document.metadata.get("table")
             if table in tables:

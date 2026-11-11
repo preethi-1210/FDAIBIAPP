@@ -84,12 +84,11 @@ class SchemaRagTests(unittest.TestCase):
         results = rag.retrieve("orders last week", "finance")
 
         self.assertEqual(results, [expected])
-        # self.assertEqual(vector_store.delete_collection.call_count, 2)
-        self.assertEqual(vector_store.delete_collection.call_count, 1)
+        # Recovery gets a fresh collection reference, re-adds the documents and retries once.
         self.assertEqual(vector_store.reset_collection.call_count, 1)
-        self.assertEqual(chroma.call_count, 3)
-        self.assertEqual(vector_store.add_documents.call_count, 1)
-        self.assertEqual(vector_store.similarity_search.call_count, 1)
+        self.assertEqual(chroma.call_count, 2)
+        self.assertEqual(vector_store.add_documents.call_count, 2)
+        self.assertEqual(vector_store.similarity_search.call_count, 2)
 
     @patch("app.services.schema_rag.Chroma")
     @patch("app.services.schema_rag.OllamaEmbeddings")

@@ -3,7 +3,7 @@ import re
 import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
-from threading import Lock
+from threading import Lock, Thread
 from typing import Literal
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
@@ -18,9 +18,10 @@ except ImportError:
     _HTTP_ERRORS = (httpx.HTTPError,)
 from authlib.integrations.starlette_client import OAuth
 from authlib.common.errors import AuthlibBaseError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from joserfc.errors import JoseError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -33,6 +34,7 @@ from .auth import (
     ONBOARDING_TOKEN_MINUTES,
     AuthUser,
     authenticate,
+    bearer,
     create_access_token,
     create_onboarding_token,
     get_current_user,
@@ -43,7 +45,8 @@ from .auth import (
 )
 from .cache import get_json as cache_get_json
 from .cache import health as cache_health
-from .cache import LocalTTLCache, scoped_key, set_json as cache_set_json
+from .services.observability import current_request_id
+from .cache import LocalTTLCache, rate_limit_exceeded, scoped_key, set_json as cache_set_json
 from .config import settings
 from .db import SessionLocal, engine, get_db
 from .domains import DEMO_USERS, DOMAINS, DOMAIN_LABELS, PROMPTS
@@ -76,8 +79,11 @@ from .sensitive_data import (
     requested_sensitive_type,
     sanitize_sensitive_rows,
 )
+from .domains import finance_gold_glossary
 from .seed import apply_postgres_routines, ensure_schema, seed_if_empty
+from .subscription_api import router as subscription_router
 from .services.guardrail import GuardrailError
+from .services.observability import JsonFormatter, RedactingFilter, render_prometheus
 from .services.orchestrator import Orchestrator
 from .services.reports import get_report
 from .access_api import router as access_router
@@ -96,7 +102,12 @@ def _configure_logging() -> None:
     app_logger = logging.getLogger("app")
     if not app_logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(
+            JsonFormatter()
+            if settings.log_format.lower() == "json"
+            else logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        handler.addFilter(RedactingFilter())
         app_logger.addHandler(handler)
     app_logger.setLevel(settings.log_level.upper())
 
@@ -111,6 +122,7 @@ logger = logging.getLogger(__name__)
 _dashboard_cache: dict[tuple[str, str, str, str | None], tuple[float, dict]] = {}
 _dashboard_cache_lock = Lock()
 _report_cache = LocalTTLCache(max_entries=256)
+_idempotent_responses = LocalTTLCache(max_entries=512)
 _request_id_pattern = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
@@ -119,6 +131,7 @@ def _get_conversation_context(
     user: AuthUser,
     conversation_id: UUID,
     title: str,
+    limit: int = 12,
 ) -> tuple[Conversation, list[dict[str, str]]]:
     conversation = db.get(Conversation, str(conversation_id))
     if conversation is not None and (
@@ -141,7 +154,7 @@ def _get_conversation_context(
         db.query(ConversationMessage)
         .filter(ConversationMessage.conversation_id == str(conversation_id))
         .order_by(ConversationMessage.id.desc())
-        .limit(12)
+        .limit(limit)
         .all()
     )
     context = [
@@ -187,6 +200,7 @@ def shutdown() -> None:
 async def request_metrics(request: Request, call_next):
     supplied_id = request.headers.get("x-request-id", "")
     request_id = supplied_id if _request_id_pattern.fullmatch(supplied_id) else str(uuid4())
+    current_request_id.set(request_id)
     started = time.perf_counter()
     try:
         if (
@@ -196,6 +210,20 @@ async def request_metrics(request: Request, call_next):
             and request.headers.get("origin") not in allowed_origins
         ):
             response = JSONResponse({"detail": "Invalid request origin."}, status_code=403)
+        elif (
+            request.method == "POST"
+            and request.url.path == "/auth/login"
+            and rate_limit_exceeded(
+                "login",
+                request.client.host if request.client else "unknown",
+                settings.rate_limit_login_per_minute,
+            )
+        ):
+            response = JSONResponse(
+                {"detail": "Too many sign-in attempts. Wait a minute and try again."},
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
         else:
             response = await call_next(request)
     except Exception:
@@ -285,6 +313,13 @@ def _oidc_client():
 def health() -> dict:
     database = _database_health()
     cache = cache_health()
+    if not settings.demo_mode:
+        # This endpoint is unauthenticated: outside demo mode it reports status, not configuration.
+        return {
+            "status": "ok" if database["status"] == "ok" else "degraded",
+            "database": {"status": database["status"]},
+            "cache": {"status": cache["status"]},
+        }
     return {
         "status": "ok" if database["status"] == "ok" else "degraded",
         "platform": settings.app_name,
@@ -298,6 +333,62 @@ def health() -> dict:
         "demo_mode": settings.demo_mode,
         "domains": list(DOMAINS),
     }
+
+
+_warmup_lock = Lock()
+_next_warmup_at = 0.0
+
+
+def _retry_warmup() -> None:
+    """Reload schema metadata in the background, at most once a minute, after a warehouse outage.
+
+    Without this a process that started during an outage stays not ready until a restart.
+    """
+    global _next_warmup_at
+    now = time.monotonic()
+    if orchestrator._ready or now < _next_warmup_at or not _warmup_lock.acquire(blocking=False):
+        return
+    _next_warmup_at = now + 60
+
+    def load() -> None:
+        try:
+            with SessionLocal() as db:
+                orchestrator.warmup(db)
+            logger.info("Schema metadata loaded after an earlier failure")
+        except Exception as exc:
+            logger.warning("Schema metadata still unavailable: %s", type(exc).__name__)
+        finally:
+            _warmup_lock.release()
+
+    Thread(target=load, daemon=True, name="schema-warmup").start()
+
+
+@app.get("/ready")
+def ready() -> JSONResponse:
+    """Readiness: can this process serve Ask AI? Does not run a warehouse query itself."""
+    _retry_warmup()
+    checks = {
+        "database": _database_health()["status"] == "ok",
+        "schema_metadata_loaded": orchestrator._ready,
+        "warehouse_configured": bool(warehouse_status()["ready"]),
+    }
+    return JSONResponse({"ready": all(checks.values()), "checks": checks}, status_code=200 if all(checks.values()) else 503)
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics(
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+) -> PlainTextResponse:
+    """Prometheus metrics, for a scrape token or an administrator. Contains no business data."""
+    token_matches = (
+        settings.metrics_token
+        and creds is not None
+        and secrets.compare_digest(creds.credentials.encode(), settings.metrics_token.encode())
+    )
+    if not token_matches and get_current_user(creds, db).role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access is required.")
+    return PlainTextResponse(render_prometheus())
 
 
 @app.get("/auth/domains")
@@ -612,13 +703,36 @@ def query(
     body: QueryRequest,
     db: Session = Depends(get_db),
     user: AuthUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=120),
 ) -> QueryResponse:
+    if rate_limit_exceeded("query", user.username, settings.rate_limit_query_per_minute):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many questions in a short time. Wait a minute and try again.",
+            headers={"Retry-After": "60"},
+        )
+    # A retried request with the same key returns the same answer instead of running twice. The
+    # key is scoped to the user and domain, and authentication has already been re-checked.
+    replay_key = (
+        scoped_key(
+            "idempotency",
+            {"key": idempotency_key, "user": user.username, "domain": user.domain, "tenant": user.tenant_id, "question": body.question},
+        )
+        if isinstance(idempotency_key, str)
+        else None
+    )
+    if replay_key:
+        previous = _idempotent_responses.get(replay_key)
+        if previous is not None:
+            return previous
     conversation_id = body.conversation_id or uuid4()
     conversation, conversation_context = _get_conversation_context(
         db,
         user,
         conversation_id,
         body.question,
+        # The most any plan allows; the orchestrator trims this to the user's own limit.
+        limit=24 if settings.subscriptions_enabled else 12,
     )
     inference_started = time.perf_counter()
     try:
@@ -654,7 +768,15 @@ def query(
         ]
     )
     db.commit()
+    if replay_key:
+        _idempotent_responses.set(replay_key, response, 300)
     return response
+
+
+app.include_router(subscription_router)
+
+# Versioned path for API clients; /query stays for the existing frontend.
+app.add_api_route("/v1/query", query, methods=["POST"], response_model=QueryResponse)
 
 
 @app.get("/dashboard")
@@ -1081,7 +1203,11 @@ def user_context(
             raise HTTPException(status_code=403, detail="This user has no administrator-provisioned Healthcare tenant.")
 
     graph = orchestrator.graph
-    domain_glossary = db.query(Glossary).filter(Glossary.domain == selected_domain).all()
+    domain_glossary = (
+        [Glossary(**row) for row in finance_gold_glossary()]
+        if selected_domain == "finance" and settings.warehouse == "databricks"
+        else db.query(Glossary).filter(Glossary.domain == selected_domain).all()
+    )
     if settings.warehouse in {"databricks", "snowflake"}:
         tables = graph.domain_tables.get(selected_domain, {})
     else:

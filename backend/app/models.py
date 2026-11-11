@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -103,6 +105,33 @@ class AccessAuditEvent(Base):
     request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class KnowledgeDocument(Base):
+    """An approved knowledge source. Updates raise the version; deletion keeps the record."""
+
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(160), unique=True)
+    title: Mapped[str] = mapped_column(String(200))
+    domain: Mapped[str] = mapped_column(String(40), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    approved_by: Mapped[str] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    # JSON array from the embedding model. Empty when the model was unavailable at ingestion.
+    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class OAuthIdentity(Base):
@@ -296,6 +325,19 @@ class ConversationMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
 
 
+class ConversationQueryState(Base):
+    """The last validated query plan in a conversation, so follow-ups keep its metric and filters."""
+
+    __tablename__ = "conversation_query_states"
+
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plan_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
 class HitlReview(Base):
     __tablename__ = "hitl_reviews"
 
@@ -474,3 +516,164 @@ class HealthcareQualityMetric(Base):
     metric_name: Mapped[str] = mapped_column(String(80))
     metric_value: Mapped[float] = mapped_column(Float)
     reporting_period: Mapped[str] = mapped_column(String(20))
+
+
+class SubscriptionPlan(Base):
+    """A plan an administrator can edit. A missing price means it cannot be bought yet."""
+
+    __tablename__ = "subscription_plans"
+
+    code: Mapped[str] = mapped_column(String(30), primary_key=True)
+    name: Mapped[str] = mapped_column(String(60))
+    tagline: Mapped[str] = mapped_column(String(200), default="")
+    monthly_price_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    yearly_price_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    monthly_credits: Mapped[int] = mapped_column(Integer)
+    # False until an administrator saves the plan: the starting values are placeholders.
+    allowance_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_context_messages: Mapped[int] = mapped_column(Integer, default=12)
+    allowed_providers: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    fair_use_note: Mapped[str] = mapped_column(Text, default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class PlanFeature(Base):
+    __tablename__ = "plan_features"
+    __table_args__ = (UniqueConstraint("plan_code", "feature", name="uq_plan_feature"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_code: Mapped[str] = mapped_column(String(30), ForeignKey("subscription_plans.code", ondelete="CASCADE"), index=True)
+    feature: Mapped[str] = mapped_column(String(40))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    credit_cost: Mapped[int] = mapped_column(Integer, default=0)
+    period_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class UserSubscription(Base):
+    """One current subscription per user. Unrelated to domain grants: a plan never unlocks data."""
+
+    __tablename__ = "user_subscriptions"
+
+    username: Mapped[str] = mapped_column(String(80), primary_key=True)
+    plan_code: Mapped[str] = mapped_column(String(30), ForeignKey("subscription_plans.code"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    billing_cycle: Mapped[str] = mapped_column(String(10), default="none")
+    current_period_start: Mapped[datetime] = mapped_column(DateTime)
+    current_period_end: Mapped[datetime] = mapped_column(DateTime, index=True)
+    auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+    scheduled_plan_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="default")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class UsagePeriod(Base):
+    """A monthly allowance and how much of it is used. Yearly plans also reset monthly."""
+
+    __tablename__ = "usage_periods"
+    __table_args__ = (UniqueConstraint("username", "period_start", name="uq_usage_period_user_start"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    plan_code: Mapped[str] = mapped_column(String(30))
+    period_start: Mapped[datetime] = mapped_column(DateTime)
+    period_end: Mapped[datetime] = mapped_column(DateTime)
+    credits_allocated: Mapped[int] = mapped_column(Integer)
+    credits_adjustment: Mapped[int] = mapped_column(Integer, default=0)
+    credits_used: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class UsageTransaction(Base):
+    """The ledger behind credits_used. The unique key is what prevents a double deduction."""
+
+    __tablename__ = "usage_transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    domain: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    period_id: Mapped[int] = mapped_column(Integer, ForeignKey("usage_periods.id"), index=True)
+    feature: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    credits: Mapped[int] = mapped_column(Integer)
+    audit_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    actor: Mapped[str] = mapped_column(String(80), default="system")
+    reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class LlmUsageEvent(Base):
+    """One provider attempt, as the provider reported it. Holds no question text or results.
+    Token columns are NULL when the provider sent none, which is different from zero."""
+
+    __tablename__ = "llm_usage_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True)
+    provider: Mapped[str] = mapped_column(String(30), index=True)
+    model: Mapped[str] = mapped_column(String(120))
+    stage: Mapped[str] = mapped_column(String(40))
+    ok: Mapped[bool] = mapped_column(Boolean)
+    error_kind: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audit_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class UsageNotification(Base):
+    """A threshold crossed. The constraint means each is raised once per usage period."""
+
+    __tablename__ = "usage_notifications"
+    __table_args__ = (UniqueConstraint("period_id", "threshold", name="uq_usage_notification_period_threshold"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    period_id: Mapped[int] = mapped_column(Integer, ForeignKey("usage_periods.id"))
+    threshold: Mapped[int] = mapped_column(Integer)
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class SubscriptionHistory(Base):
+    __tablename__ = "subscription_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    action: Mapped[str] = mapped_column(String(30))
+    actor: Mapped[str] = mapped_column(String(80))
+    from_plan: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    to_plan: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+
+
+class PaymentTransaction(Base):
+    """An order and its outcome. Status becomes paid only after server-side verification."""
+
+    __tablename__ = "payment_transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    plan_code: Mapped[str] = mapped_column(String(30))
+    billing_cycle: Mapped[str] = mapped_column(String(10))
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3))
+    gateway: Mapped[str] = mapped_column(String(20))
+    gateway_order_id: Mapped[str] = mapped_column(String(120), unique=True)
+    gateway_payment_id: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="created")
+    receipt_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive, index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

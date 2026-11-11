@@ -86,6 +86,41 @@ def _plan(question: str, intent: str, is_prediction: bool, planner: str, **extra
     }
 
 
+_APPLICATION_QUESTION = re.compile(
+    r"\bmy\s+(?:access|domains?|requests?|permissions?|role|conversations?|history|reviews?|approvals?)\b"
+    r"|\bwhich\s+domains?\b.*\b(?:i|me)\b|\bwhat\s+(?:have\s+i\s+asked|domains?\s+can\s+i)\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_QUESTION = re.compile(
+    r"^\s*(?:what\s+(?:does|do)\b.*\bmean\b|define\b|(?:the\s+)?(?:meaning|definition)\s+of\b|what\s+is\s+(?:a|an)\s"
+    r"|how\s+(?:is|are)\b.*\b(?:calculated|computed|defined)\b|explain\s+(?:the\s+term|what)\b"
+    r"|why\s+(?:is|are|does|do|can)\b|what\s+(?:period|date\s+range|dates)\b|how\s+(?:fresh|recent|current)\b|what\s+data\b)",
+    re.IGNORECASE,
+)
+
+
+def is_reference_question(question: str) -> bool:
+    """Asks about the user's own records or what a term means, rather than for a measured value."""
+    return bool(
+        _APPLICATION_QUESTION.search(question)
+        or (_KNOWLEDGE_QUESTION.search(question) and not re.search(r"\d", question))
+    )
+
+
+def route_question(question: str, plan: dict[str, Any]) -> str:
+    """Choose the governed source for a question. Deterministic, and it only selects among tools
+    that enforce the user's permissions themselves, so a wrong route cannot widen access."""
+    if plan.get("intent") in {"help", "general"} or plan.get("needs_clarification"):
+        return "none"
+    if plan.get("is_prediction"):
+        return "prediction"
+    if _APPLICATION_QUESTION.search(question):
+        return "application"
+    if _KNOWLEDGE_QUESTION.search(question) and not re.search(r"\d", question):
+        return "knowledge"
+    return "metric"
+
+
 def needs_llm_planning(question: str, conversation_context: list[dict[str, str]] | None) -> bool:
     words = re.findall(r"[A-Za-z0-9]+", question)
     referential = bool(conversation_context) and bool(_FOLLOW_UP.search(question))

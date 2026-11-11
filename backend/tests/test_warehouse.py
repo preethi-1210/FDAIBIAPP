@@ -47,7 +47,10 @@ class FakeCursor:
                     "agg_claims_daily",
                     "agg_policies_daily",
                 ),
-                "retail": ("agg_retail_orders_daily", "fact_retail_orders"),
+                "retail": (
+                    "gold_orders", "gold_customers", "gold_products", "gold_order_items",
+                    "gold_payments", "gold_inventory", "gold_returns", "gold_stores",
+                ),
             }
             return [(table,) for table in tables.get(catalog, ())]
         return [(1,)]
@@ -114,7 +117,7 @@ class WarehouseTests(unittest.TestCase):
             _databricks_execute_many(
                 [
                     "SELECT * FROM transactions WHERE transaction_date >= :start "
-                    "AND transaction_date < :end AND category = :category"
+                    "AND transaction_date < :end AND category = :category LIMIT 10"
                 ],
                 domain="banking",
                 parameter_sets=[{"start": "2026-09-01", "end": "2026-10-01", "category": "retail"}],
@@ -124,7 +127,7 @@ class WarehouseTests(unittest.TestCase):
             executed[-1],
             (
                 "SELECT * FROM transactions WHERE transaction_date >= ? "
-                "AND transaction_date < ? AND category = ?",
+                "AND transaction_date < ? AND category = ? LIMIT 10",
                 ("2026-09-01", "2026-10-01", "retail"),
             ),
         )

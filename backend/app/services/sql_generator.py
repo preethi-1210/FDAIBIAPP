@@ -48,16 +48,64 @@ def _generate_databricks_domain_prompt(
               AND _gold_date < CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)
         """.strip()
 
+    if domain == "finance" and "account" in q and "status" in q and has_columns("gold_accounts", "status", "cash_balance"):
+        return """
+            SELECT status,
+                   COUNT(*) AS account_count,
+                   COALESCE(SUM(cash_balance), 0) AS total_cash_balance
+            FROM gold_accounts
+            GROUP BY status
+            ORDER BY status
+        """.strip()
+
+    if domain == "finance" and "account opening" in q and "month" in q and has_columns("agg_accounts_monthly", "_gold_month", "record_count"):
+        return """
+            SELECT _gold_month AS month,
+                   COALESCE(record_count, 0) AS accounts_opened
+            FROM agg_accounts_monthly
+            ORDER BY _gold_month
+        """.strip()
+
+    if (
+        domain == "finance"
+        and "securit" in q
+        and "trading activity" in q
+        and has_columns("gold_trades", "security_id", "quantity")
+        and has_columns("gold_securities", "security_id", "symbol", "security_name")
+    ):
+        # A left join: 30 trades have no matching security, and they should not vanish.
+        return """
+            SELECT t.security_id,
+                   s.symbol,
+                   s.security_name,
+                   COUNT(*) AS trade_count,
+                   COALESCE(SUM(t.quantity), 0) AS total_quantity
+            FROM gold_trades t
+            LEFT JOIN gold_securities s ON s.security_id = t.security_id
+            GROUP BY t.security_id, s.symbol, s.security_name
+            ORDER BY trade_count DESC
+            LIMIT 10
+        """.strip()
+
+    if domain == "finance" and "dividend" in q and "record" in q and has_columns("gold_dividends", "security_id", "ex_date"):
+        return """
+            SELECT COUNT(*) AS dividend_records,
+                   COUNT(DISTINCT security_id) AS securities,
+                   MIN(ex_date) AS first_ex_date,
+                   MAX(ex_date) AS last_ex_date
+            FROM gold_dividends
+        """.strip()
+
     if (
         domain == "finance"
         and "account" in q
         and "balance" in q
         and "month" in q
-        and has_columns("agg_accounts_monthly", "_gold_month", "total_balance", "record_count")
+        and has_columns("agg_accounts_monthly", "_gold_month", "total_cash_balance", "record_count")
     ):
         return """
             SELECT _gold_month AS month,
-                   COALESCE(total_balance, 0) AS total_balance,
+                   COALESCE(total_cash_balance, 0) AS total_cash_balance,
                    COALESCE(record_count, 0) AS account_count
             FROM agg_accounts_monthly
             ORDER BY _gold_month DESC

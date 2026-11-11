@@ -208,7 +208,7 @@ class DatabricksDashboardQueryTests(unittest.TestCase):
                 "finance",
                 "Show account balances by month",
                 "agg_accounts_monthly",
-                "total_balance",
+                "total_cash_balance",
             ),
             (
                 "insurance",
@@ -229,7 +229,7 @@ class DatabricksDashboardQueryTests(unittest.TestCase):
                 "agg_accounts_monthly": [
                     {"name": "_gold_month"},
                     {"name": "record_count"},
-                    {"name": "total_balance"},
+                    {"name": "total_cash_balance"},
                 ]
             },
             "insurance": {

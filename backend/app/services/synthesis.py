@@ -5,6 +5,7 @@ from typing import Any
 
 from ..llm import complete_text, record_step
 from ..schemas import PredictionPayload, UncertaintyPayload
+from ..sensitive_data import llm_safe_rows
 from .conversation_context import format_conversation_context
 
 _NUMBER_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
@@ -83,7 +84,8 @@ def synthesize(
     conversation_context: list[dict[str, str]] | None = None,
     intent: str | None = None,
 ) -> str:
-    preview = table[:12]
+    # The model gets minimized rows whatever the viewer may see.
+    preview = llm_safe_rows(table[:12])
     pred_txt = ""
     if prediction and uncertainty:
         pred_txt = (
