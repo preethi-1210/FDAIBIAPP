@@ -1,0 +1,652 @@
+{
+  "domain": "retail",
+  "source": "retail catalog, information_schema, 2026-11-11",
+  "status": "draft: generated, awaiting review",
+  "reviewed_by": null,
+  "tables": {
+    "agg_customers_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_customers_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_inventory_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_stock_qty",
+        "avg_stock_qty",
+        "total_reorder_level",
+        "avg_reorder_level"
+      ],
+      "restricted": []
+    },
+    "agg_inventory_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_stock_qty",
+        "avg_stock_qty",
+        "total_reorder_level",
+        "avg_reorder_level"
+      ],
+      "restricted": []
+    },
+    "agg_order_items_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_quantity",
+        "avg_quantity",
+        "total_unit_price",
+        "avg_unit_price",
+        "total_discount_pct",
+        "avg_discount_pct"
+      ],
+      "restricted": []
+    },
+    "agg_order_items_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_quantity",
+        "avg_quantity",
+        "total_unit_price",
+        "avg_unit_price",
+        "total_discount_pct",
+        "avg_discount_pct"
+      ],
+      "restricted": []
+    },
+    "agg_payments_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_amount",
+        "avg_amount"
+      ],
+      "restricted": []
+    },
+    "agg_payments_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_amount",
+        "avg_amount"
+      ],
+      "restricted": []
+    },
+    "agg_products_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_cost_price",
+        "avg_cost_price",
+        "total_mrp",
+        "avg_mrp"
+      ],
+      "restricted": []
+    },
+    "agg_products_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_cost_price",
+        "avg_cost_price",
+        "total_mrp",
+        "avg_mrp"
+      ],
+      "restricted": []
+    },
+    "agg_returns_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_refund_amount",
+        "avg_refund_amount"
+      ],
+      "restricted": []
+    },
+    "agg_returns_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_refund_amount",
+        "avg_refund_amount"
+      ],
+      "restricted": []
+    },
+    "dim_customers": {
+      "columns": [
+        "customer_id",
+        "gender",
+        "city",
+        "state",
+        "loyalty_tier",
+        "signup_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "customers_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "dob"
+      ]
+    },
+    "dim_orders": {
+      "columns": [
+        "order_id",
+        "customer_id",
+        "store_id",
+        "order_date",
+        "channel",
+        "order_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "orders_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_payments": {
+      "columns": [
+        "amount",
+        "order_id",
+        "payment_id",
+        "payment_mode",
+        "payment_status",
+        "payment_ts",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "payments_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_returns": {
+      "columns": [
+        "return_id",
+        "order_item_id",
+        "return_date",
+        "reason",
+        "refund_amount",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "returns_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_stores": {
+      "columns": [
+        "store_id",
+        "store_name",
+        "city",
+        "state",
+        "region",
+        "format",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "stores_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_inventory": {
+      "columns": [
+        "snapshot_date",
+        "store_id",
+        "product_id",
+        "stock_qty",
+        "reorder_level",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_order_items": {
+      "columns": [
+        "order_item_id",
+        "order_id",
+        "product_id",
+        "quantity",
+        "unit_price",
+        "discount_pct",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_products": {
+      "columns": [
+        "product_id",
+        "product_name",
+        "category",
+        "brand",
+        "cost_price",
+        "mrp",
+        "launch_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "gold_customers": {
+      "columns": [
+        "customer_id",
+        "gender",
+        "city",
+        "state",
+        "loyalty_tier",
+        "signup_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "dob"
+      ]
+    },
+    "gold_inventory": {
+      "columns": [
+        "snapshot_date",
+        "store_id",
+        "product_id",
+        "stock_qty",
+        "reorder_level",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_order_items": {
+      "columns": [
+        "order_item_id",
+        "order_id",
+        "product_id",
+        "quantity",
+        "unit_price",
+        "discount_pct",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_orders": {
+      "columns": [
+        "order_id",
+        "customer_id",
+        "store_id",
+        "order_date",
+        "channel",
+        "order_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_payments": {
+      "columns": [
+        "amount",
+        "order_id",
+        "payment_id",
+        "payment_mode",
+        "payment_status",
+        "payment_ts",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_products": {
+      "columns": [
+        "product_id",
+        "product_name",
+        "category",
+        "brand",
+        "cost_price",
+        "mrp",
+        "launch_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_returns": {
+      "columns": [
+        "return_id",
+        "order_item_id",
+        "return_date",
+        "reason",
+        "refund_amount",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_stores": {
+      "columns": [
+        "store_id",
+        "store_name",
+        "city",
+        "state",
+        "region",
+        "format",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "snapshot_customers": {
+      "columns": [
+        "customer_id",
+        "gender",
+        "city",
+        "state",
+        "loyalty_tier",
+        "signup_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "dob"
+      ]
+    },
+    "snapshot_inventory": {
+      "columns": [
+        "snapshot_date",
+        "store_id",
+        "product_id",
+        "stock_qty",
+        "reorder_level",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_order_items": {
+      "columns": [
+        "order_item_id",
+        "order_id",
+        "product_id",
+        "quantity",
+        "unit_price",
+        "discount_pct",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_orders": {
+      "columns": [
+        "order_id",
+        "customer_id",
+        "store_id",
+        "order_date",
+        "channel",
+        "order_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_payments": {
+      "columns": [
+        "amount",
+        "order_id",
+        "payment_id",
+        "payment_mode",
+        "payment_status",
+        "payment_ts",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_products": {
+      "columns": [
+        "product_id",
+        "product_name",
+        "category",
+        "brand",
+        "cost_price",
+        "mrp",
+        "launch_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_returns": {
+      "columns": [
+        "return_id",
+        "order_item_id",
+        "return_date",
+        "reason",
+        "refund_amount",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_stores": {
+      "columns": [
+        "store_id",
+        "store_name",
+        "city",
+        "state",
+        "region",
+        "format",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "summary_customers": {
+      "columns": [
+        "customer_id"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone",
+        "min_phone",
+        "max_phone"
+      ]
+    },
+    "summary_inventory": {
+      "columns": [
+        "store_id",
+        "total_stock_qty",
+        "avg_stock_qty",
+        "min_stock_qty",
+        "max_stock_qty",
+        "total_reorder_level",
+        "avg_reorder_level",
+        "min_reorder_level",
+        "max_reorder_level"
+      ],
+      "restricted": []
+    },
+    "summary_order_items": {
+      "columns": [
+        "order_item_id",
+        "total_quantity",
+        "avg_quantity",
+        "min_quantity",
+        "max_quantity",
+        "total_unit_price",
+        "avg_unit_price",
+        "min_unit_price",
+        "max_unit_price",
+        "total_discount_pct",
+        "avg_discount_pct",
+        "min_discount_pct",
+        "max_discount_pct"
+      ],
+      "restricted": []
+    },
+    "summary_payments": {
+      "columns": [
+        "order_id",
+        "total_amount",
+        "avg_amount",
+        "min_amount",
+        "max_amount"
+      ],
+      "restricted": []
+    },
+    "summary_products": {
+      "columns": [
+        "product_id",
+        "total_cost_price",
+        "avg_cost_price",
+        "min_cost_price",
+        "max_cost_price",
+        "total_mrp",
+        "avg_mrp",
+        "min_mrp",
+        "max_mrp"
+      ],
+      "restricted": []
+    },
+    "summary_returns": {
+      "columns": [
+        "return_id",
+        "total_refund_amount",
+        "avg_refund_amount",
+        "min_refund_amount",
+        "max_refund_amount"
+      ],
+      "restricted": []
+    }
+  },
+  "excluded_tables": {
+    "gold_column_profile": "data profiling output",
+    "gold_data_quality": "data-quality results",
+    "gold_load_summary": "load bookkeeping",
+    "gold_metadata": "pipeline metadata, not business data",
+    "gold_table_profile": "data profiling output"
+  }
+}

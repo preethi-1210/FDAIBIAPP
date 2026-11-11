@@ -1,0 +1,704 @@
+{
+  "domain": "healthcare",
+  "source": "healthcare catalog, information_schema, 2026-11-11",
+  "status": "draft: generated, awaiting review",
+  "reviewed_by": null,
+  "tables": {
+    "agg_claims_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_billed_amount",
+        "avg_billed_amount",
+        "total_approved_amount",
+        "avg_approved_amount"
+      ],
+      "restricted": []
+    },
+    "agg_claims_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_billed_amount",
+        "avg_billed_amount",
+        "total_approved_amount",
+        "avg_approved_amount"
+      ],
+      "restricted": []
+    },
+    "agg_doctors_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_experience_years",
+        "avg_experience_years"
+      ],
+      "restricted": []
+    },
+    "agg_doctors_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_experience_years",
+        "avg_experience_years"
+      ],
+      "restricted": []
+    },
+    "agg_facilities_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_beds",
+        "avg_beds"
+      ],
+      "restricted": []
+    },
+    "agg_facilities_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_beds",
+        "avg_beds"
+      ],
+      "restricted": []
+    },
+    "agg_lab_results_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_ref_high",
+        "avg_ref_high",
+        "total_ref_low",
+        "avg_ref_low",
+        "total_result_value",
+        "avg_result_value"
+      ],
+      "restricted": []
+    },
+    "agg_lab_results_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_ref_high",
+        "avg_ref_high",
+        "total_ref_low",
+        "avg_ref_low",
+        "total_result_value",
+        "avg_result_value"
+      ],
+      "restricted": []
+    },
+    "agg_patients_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_patients_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_prescriptions_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_dosage_mg",
+        "avg_dosage_mg",
+        "total_frequency_per_day",
+        "avg_frequency_per_day",
+        "total_days",
+        "avg_days",
+        "total_cost",
+        "avg_cost"
+      ],
+      "restricted": []
+    },
+    "agg_prescriptions_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_dosage_mg",
+        "avg_dosage_mg",
+        "total_frequency_per_day",
+        "avg_frequency_per_day",
+        "total_days",
+        "avg_days",
+        "total_cost",
+        "avg_cost"
+      ],
+      "restricted": []
+    },
+    "dim_diagnoses": {
+      "columns": [
+        "encounter_id",
+        "description",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "diagnoses_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "diagnosis_id",
+        "icd10_code",
+        "diagnosis_type"
+      ]
+    },
+    "dim_doctors": {
+      "columns": [
+        "doctor_id",
+        "doctor_name",
+        "specialty",
+        "facility_id",
+        "experience_years",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "doctors_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "dim_encounters": {
+      "columns": [
+        "encounter_id",
+        "patient_id",
+        "doctor_id",
+        "facility_id",
+        "encounter_type",
+        "admit_date",
+        "discharge_date",
+        "department",
+        "discharge_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "encounters_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_facilities": {
+      "columns": [
+        "facility_id",
+        "facility_name",
+        "city",
+        "state",
+        "facility_type",
+        "beds",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "facilities_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_patients": {
+      "columns": [
+        "patient_id",
+        "gender",
+        "city",
+        "state",
+        "registration_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "patients_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "national_id",
+        "blood_group",
+        "insurance_id"
+      ]
+    },
+    "fact_claims": {
+      "columns": [
+        "claim_id",
+        "encounter_id",
+        "patient_id",
+        "insurer",
+        "billed_amount",
+        "approved_amount",
+        "claim_status",
+        "claim_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_lab_results": {
+      "columns": [
+        "encounter_id",
+        "lab_id",
+        "ref_high",
+        "ref_low",
+        "result_date",
+        "result_value",
+        "status",
+        "test_name",
+        "unit",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_prescriptions": {
+      "columns": [
+        "rx_id",
+        "encounter_id",
+        "drug_name",
+        "dosage_mg",
+        "frequency_per_day",
+        "days",
+        "cost",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "gold_claims": {
+      "columns": [
+        "claim_id",
+        "encounter_id",
+        "patient_id",
+        "insurer",
+        "billed_amount",
+        "approved_amount",
+        "claim_status",
+        "claim_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_diagnoses": {
+      "columns": [
+        "encounter_id",
+        "description",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "diagnosis_id",
+        "icd10_code",
+        "diagnosis_type"
+      ]
+    },
+    "gold_doctors": {
+      "columns": [
+        "doctor_id",
+        "doctor_name",
+        "specialty",
+        "facility_id",
+        "experience_years",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "gold_encounters": {
+      "columns": [
+        "encounter_id",
+        "patient_id",
+        "doctor_id",
+        "facility_id",
+        "encounter_type",
+        "admit_date",
+        "discharge_date",
+        "department",
+        "discharge_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_facilities": {
+      "columns": [
+        "facility_id",
+        "facility_name",
+        "city",
+        "state",
+        "facility_type",
+        "beds",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_lab_results": {
+      "columns": [
+        "encounter_id",
+        "lab_id",
+        "ref_high",
+        "ref_low",
+        "result_date",
+        "result_value",
+        "status",
+        "test_name",
+        "unit",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_patients": {
+      "columns": [
+        "patient_id",
+        "gender",
+        "city",
+        "state",
+        "registration_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "national_id",
+        "blood_group",
+        "insurance_id"
+      ]
+    },
+    "gold_prescriptions": {
+      "columns": [
+        "rx_id",
+        "encounter_id",
+        "drug_name",
+        "dosage_mg",
+        "frequency_per_day",
+        "days",
+        "cost",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "snapshot_claims": {
+      "columns": [
+        "claim_id",
+        "encounter_id",
+        "patient_id",
+        "insurer",
+        "billed_amount",
+        "approved_amount",
+        "claim_status",
+        "claim_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_diagnoses": {
+      "columns": [
+        "encounter_id",
+        "description",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "diagnosis_id",
+        "icd10_code",
+        "diagnosis_type"
+      ]
+    },
+    "snapshot_doctors": {
+      "columns": [
+        "doctor_id",
+        "doctor_name",
+        "specialty",
+        "facility_id",
+        "experience_years",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "snapshot_encounters": {
+      "columns": [
+        "encounter_id",
+        "patient_id",
+        "doctor_id",
+        "facility_id",
+        "encounter_type",
+        "admit_date",
+        "discharge_date",
+        "department",
+        "discharge_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_facilities": {
+      "columns": [
+        "facility_id",
+        "facility_name",
+        "city",
+        "state",
+        "facility_type",
+        "beds",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_lab_results": {
+      "columns": [
+        "encounter_id",
+        "lab_id",
+        "ref_high",
+        "ref_low",
+        "result_date",
+        "result_value",
+        "status",
+        "test_name",
+        "unit",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_patients": {
+      "columns": [
+        "patient_id",
+        "gender",
+        "city",
+        "state",
+        "registration_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "national_id",
+        "blood_group",
+        "insurance_id"
+      ]
+    },
+    "snapshot_prescriptions": {
+      "columns": [
+        "rx_id",
+        "encounter_id",
+        "drug_name",
+        "dosage_mg",
+        "frequency_per_day",
+        "days",
+        "cost",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "summary_claims": {
+      "columns": [
+        "claim_id",
+        "total_billed_amount",
+        "avg_billed_amount",
+        "min_billed_amount",
+        "max_billed_amount",
+        "total_approved_amount",
+        "avg_approved_amount",
+        "min_approved_amount",
+        "max_approved_amount"
+      ],
+      "restricted": []
+    },
+    "summary_doctors": {
+      "columns": [
+        "doctor_id",
+        "total_experience_years",
+        "avg_experience_years",
+        "min_experience_years",
+        "max_experience_years"
+      ],
+      "restricted": []
+    },
+    "summary_facilities": {
+      "columns": [
+        "facility_id",
+        "total_beds",
+        "avg_beds",
+        "min_beds",
+        "max_beds"
+      ],
+      "restricted": []
+    },
+    "summary_lab_results": {
+      "columns": [
+        "encounter_id",
+        "total_ref_high",
+        "avg_ref_high",
+        "min_ref_high",
+        "max_ref_high",
+        "total_ref_low",
+        "avg_ref_low",
+        "min_ref_low",
+        "max_ref_low",
+        "total_result_value",
+        "avg_result_value",
+        "min_result_value",
+        "max_result_value"
+      ],
+      "restricted": []
+    },
+    "summary_patients": {
+      "columns": [
+        "patient_id"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone",
+        "min_phone",
+        "max_phone"
+      ]
+    },
+    "summary_prescriptions": {
+      "columns": [
+        "rx_id",
+        "total_dosage_mg",
+        "avg_dosage_mg",
+        "min_dosage_mg",
+        "max_dosage_mg",
+        "total_frequency_per_day",
+        "avg_frequency_per_day",
+        "min_frequency_per_day",
+        "max_frequency_per_day",
+        "total_days",
+        "avg_days",
+        "min_days",
+        "max_days",
+        "total_cost",
+        "avg_cost",
+        "min_cost",
+        "max_cost"
+      ],
+      "restricted": []
+    }
+  },
+  "excluded_tables": {
+    "gold_column_profile": "data profiling output",
+    "gold_data_quality": "data-quality results",
+    "gold_load_summary": "load bookkeeping",
+    "gold_metadata": "pipeline metadata, not business data",
+    "gold_table_profile": "data profiling output"
+  }
+}

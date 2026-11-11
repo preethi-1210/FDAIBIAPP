@@ -1,0 +1,475 @@
+{
+  "domain": "insurance",
+  "source": "insurance catalog, information_schema, 2026-11-11",
+  "status": "draft: generated, awaiting review",
+  "reviewed_by": null,
+  "tables": {
+    "agg_claims_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_approved_amount",
+        "avg_approved_amount",
+        "total_claimed_amount",
+        "avg_claimed_amount"
+      ],
+      "restricted": []
+    },
+    "agg_claims_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_approved_amount",
+        "avg_approved_amount",
+        "total_claimed_amount",
+        "avg_claimed_amount"
+      ],
+      "restricted": []
+    },
+    "agg_policies_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_sum_insured",
+        "avg_sum_insured",
+        "total_premium_amount",
+        "avg_premium_amount"
+      ],
+      "restricted": []
+    },
+    "agg_policies_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_sum_insured",
+        "avg_sum_insured",
+        "total_premium_amount",
+        "avg_premium_amount"
+      ],
+      "restricted": []
+    },
+    "agg_policyholders_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_policyholders_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_premium_payments_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_amount_due",
+        "avg_amount_due",
+        "total_amount_paid",
+        "avg_amount_paid"
+      ],
+      "restricted": []
+    },
+    "agg_premium_payments_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_amount_due",
+        "avg_amount_due",
+        "total_amount_paid",
+        "avg_amount_paid"
+      ],
+      "restricted": []
+    },
+    "dim_agents": {
+      "columns": [
+        "agent_id",
+        "agent_name",
+        "branch_city",
+        "joining_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "agents_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "dim_policyholders": {
+      "columns": [
+        "holder_id",
+        "gender",
+        "city",
+        "state",
+        "occupation",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "policyholders_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "pan_number",
+        "nominee_name"
+      ]
+    },
+    "fact_claims": {
+      "columns": [
+        "approved_amount",
+        "claim_date",
+        "claim_id",
+        "claim_status",
+        "claim_type",
+        "claimed_amount",
+        "hospital_or_garage",
+        "incident_date",
+        "settlement_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "fact_policies": {
+      "columns": [
+        "holder_id",
+        "agent_id",
+        "policy_type",
+        "start_date",
+        "end_date",
+        "sum_insured",
+        "premium_amount",
+        "payment_frequency",
+        "policy_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "fact_premium_payments": {
+      "columns": [
+        "payment_id",
+        "due_date",
+        "paid_date",
+        "amount_due",
+        "amount_paid",
+        "mode",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "gold_agents": {
+      "columns": [
+        "agent_id",
+        "agent_name",
+        "branch_city",
+        "joining_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "gold_claims": {
+      "columns": [
+        "approved_amount",
+        "claim_date",
+        "claim_id",
+        "claim_status",
+        "claim_type",
+        "claimed_amount",
+        "hospital_or_garage",
+        "incident_date",
+        "settlement_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "gold_policies": {
+      "columns": [
+        "holder_id",
+        "agent_id",
+        "policy_type",
+        "start_date",
+        "end_date",
+        "sum_insured",
+        "premium_amount",
+        "payment_frequency",
+        "policy_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "gold_policyholders": {
+      "columns": [
+        "holder_id",
+        "gender",
+        "city",
+        "state",
+        "occupation",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "pan_number",
+        "nominee_name"
+      ]
+    },
+    "gold_premium_payments": {
+      "columns": [
+        "payment_id",
+        "due_date",
+        "paid_date",
+        "amount_due",
+        "amount_paid",
+        "mode",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "snapshot_agents": {
+      "columns": [
+        "agent_id",
+        "agent_name",
+        "branch_city",
+        "joining_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "license_no"
+      ]
+    },
+    "snapshot_claims": {
+      "columns": [
+        "approved_amount",
+        "claim_date",
+        "claim_id",
+        "claim_status",
+        "claim_type",
+        "claimed_amount",
+        "hospital_or_garage",
+        "incident_date",
+        "settlement_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "snapshot_policies": {
+      "columns": [
+        "holder_id",
+        "agent_id",
+        "policy_type",
+        "start_date",
+        "end_date",
+        "sum_insured",
+        "premium_amount",
+        "payment_frequency",
+        "policy_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "snapshot_policyholders": {
+      "columns": [
+        "holder_id",
+        "gender",
+        "city",
+        "state",
+        "occupation",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "pan_number",
+        "nominee_name"
+      ]
+    },
+    "snapshot_premium_payments": {
+      "columns": [
+        "payment_id",
+        "due_date",
+        "paid_date",
+        "amount_due",
+        "amount_paid",
+        "mode",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "summary_claims": {
+      "columns": [
+        "claim_id",
+        "total_approved_amount",
+        "avg_approved_amount",
+        "min_approved_amount",
+        "max_approved_amount",
+        "total_claimed_amount",
+        "avg_claimed_amount",
+        "min_claimed_amount",
+        "max_claimed_amount"
+      ],
+      "restricted": []
+    },
+    "summary_policies": {
+      "columns": [
+        "total_sum_insured",
+        "avg_sum_insured",
+        "min_sum_insured",
+        "max_sum_insured",
+        "total_premium_amount",
+        "avg_premium_amount",
+        "min_premium_amount",
+        "max_premium_amount"
+      ],
+      "restricted": [
+        "policy_id"
+      ]
+    },
+    "summary_policyholders": {
+      "columns": [
+        "holder_id"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone",
+        "min_phone",
+        "max_phone"
+      ]
+    },
+    "summary_premium_payments": {
+      "columns": [
+        "payment_id",
+        "total_amount_due",
+        "avg_amount_due",
+        "min_amount_due",
+        "max_amount_due",
+        "total_amount_paid",
+        "avg_amount_paid",
+        "min_amount_paid",
+        "max_amount_paid"
+      ],
+      "restricted": []
+    }
+  },
+  "excluded_tables": {
+    "gold_column_profile": "data profiling output",
+    "gold_data_quality": "data-quality results",
+    "gold_load_summary": "load bookkeeping",
+    "gold_metadata": "pipeline metadata, not business data",
+    "gold_table_profile": "data profiling output"
+  }
+}

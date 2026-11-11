@@ -51,6 +51,7 @@ from .banking_registry import supported_summary as banking_supported_summary
 from .banking_registry import values_named_in as banking_values_named_in
 from .policy import detect_prompt_injection, normalize_input, other_domain_named
 from .sql_policy import REGENERABLE, USER_MESSAGES, classify_sql_error, enforce_select_policy
+from .domain_sql_policy import check_model_sql
 from .reliability import CircuitBreaker, DeadlineExceededError, check_deadline, request_deadline
 from .guardrail import GuardrailError, validate_sql
 from .assistant_graph import BusinessAssistantGraph
@@ -333,6 +334,22 @@ def _validate_query_columns(sql: str, schema_ctx: dict[str, Any], domain: str) -
                 f"table(s): {details}. No query was run."
             ),
         )
+
+
+def _apply_domain_allowlist(sql: str, user: AuthUser, schema_ctx: dict[str, Any]) -> None:
+    """The parsed table and column allowlist for model-written SQL; see services/domain_sql_policy.py."""
+    if settings.warehouse != "databricks":
+        return
+    try:
+        catalog = (
+            databricks_healthcare_tenant_catalog(user.tenant_id)
+            if user.domain == "healthcare" and user.tenant_id
+            else databricks_domain_catalog(user.domain)
+        )
+        check_model_sql(sql, user.domain, catalog, settings.databricks_domain_schema, user.role, schema_ctx.get("tables", {}))
+    except GuardrailError as exc:
+        record_step("sql_validation", "domain table and column allowlist", ok=False, detail=str(exc)[:200])
+        raise HTTPException(status_code=422, detail=f"{exc} No query was run.") from exc
 
 
 def _validate_query_sources(sql: str, schema_ctx: dict[str, Any], domain: str) -> None:
@@ -1205,6 +1222,7 @@ class Orchestrator:
                 except GuardrailError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
             require_sql_sensitive_access(sql, user.role)
+            _apply_domain_allowlist(sql, user, schema_ctx)
             record_step("sql_validation", "read-only, authorized sources and columns, sensitive fields")
 
         check_deadline("query execution")
@@ -1506,6 +1524,7 @@ class Orchestrator:
                 _validate_query_relevance(question, sql, user.domain)
                 sql = validate_sql(sql)
                 enforce_select_policy(sql, BANKING_APPROVED_TABLES, "banking", "gold")
+                _apply_domain_allowlist(sql, user, schema_ctx)
                 # Validation cannot tell if SQL answers the question, but a named value must appear.
                 dropped = [value for value in banking_values_named_in(question) if value.lower() not in sql.lower()]
                 if dropped:

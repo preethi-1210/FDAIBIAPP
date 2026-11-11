@@ -1,0 +1,274 @@
+{
+  "domain": "banking",
+  "source": "banking catalog, information_schema, 2026-11-11",
+  "status": "draft: generated, awaiting review",
+  "reviewed_by": null,
+  "tables": {
+    "agg_accounts_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_balance",
+        "avg_balance"
+      ],
+      "restricted": []
+    },
+    "agg_accounts_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_balance",
+        "avg_balance"
+      ],
+      "restricted": []
+    },
+    "agg_cards_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_credit_limit",
+        "avg_credit_limit"
+      ],
+      "restricted": []
+    },
+    "agg_cards_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_credit_limit",
+        "avg_credit_limit"
+      ],
+      "restricted": []
+    },
+    "agg_loan_repayments_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_emi_due",
+        "avg_emi_due",
+        "total_amount_paid",
+        "avg_amount_paid"
+      ],
+      "restricted": []
+    },
+    "agg_loan_repayments_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_emi_due",
+        "avg_emi_due",
+        "total_amount_paid",
+        "avg_amount_paid"
+      ],
+      "restricted": []
+    },
+    "agg_loans_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_principal_amount",
+        "avg_principal_amount",
+        "total_interest_rate",
+        "avg_interest_rate",
+        "total_tenure_months",
+        "avg_tenure_months",
+        "total_emi_amount",
+        "avg_emi_amount"
+      ],
+      "restricted": []
+    },
+    "agg_loans_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_principal_amount",
+        "avg_principal_amount",
+        "total_interest_rate",
+        "avg_interest_rate",
+        "total_tenure_months",
+        "avg_tenure_months",
+        "total_emi_amount",
+        "avg_emi_amount"
+      ],
+      "restricted": []
+    },
+    "agg_transactions_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_amount",
+        "avg_amount"
+      ],
+      "restricted": []
+    },
+    "agg_transactions_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_amount",
+        "avg_amount"
+      ],
+      "restricted": []
+    },
+    "gold_accounts": {
+      "columns": [
+        "customer_id",
+        "branch_id",
+        "account_type",
+        "open_date",
+        "status",
+        "balance",
+        "currency",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "gold_branches": {
+      "columns": [
+        "branch_id",
+        "branch_name",
+        "city",
+        "state",
+        "region",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "ifsc_code"
+      ]
+    },
+    "gold_cards": {
+      "columns": [
+        "card_id",
+        "customer_id",
+        "card_type",
+        "credit_limit",
+        "issue_date",
+        "status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "account_id",
+        "expiry_date"
+      ]
+    },
+    "gold_customers": {
+      "columns": [
+        "customer_id",
+        "gender",
+        "city",
+        "state",
+        "kyc_status",
+        "customer_segment",
+        "onboarding_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "phone",
+        "email",
+        "pan_number",
+        "address",
+        "pincode"
+      ]
+    },
+    "gold_loan_repayments": {
+      "columns": [
+        "repayment_id",
+        "loan_id",
+        "due_date",
+        "paid_date",
+        "emi_due",
+        "amount_paid",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_loans": {
+      "columns": [
+        "loan_id",
+        "customer_id",
+        "loan_type",
+        "principal_amount",
+        "interest_rate",
+        "tenure_months",
+        "emi_amount",
+        "disbursement_date",
+        "loan_status",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_transactions": {
+      "columns": [
+        "amount",
+        "channel",
+        "city",
+        "merchant_category",
+        "status",
+        "txn_id",
+        "txn_timestamp",
+        "txn_type",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "account_id",
+        "counterparty_account"
+      ]
+    }
+  },
+  "excluded_tables": {
+    "agg_customers_daily": "not among the banking metric registry's approved tables",
+    "agg_customers_monthly": "not among the banking metric registry's approved tables",
+    "dim_accounts": "not among the banking metric registry's approved tables",
+    "dim_branches": "not among the banking metric registry's approved tables",
+    "dim_cards": "not among the banking metric registry's approved tables",
+    "dim_transactions": "not among the banking metric registry's approved tables",
+    "fact_customers": "not among the banking metric registry's approved tables",
+    "fact_loan_repayments": "not among the banking metric registry's approved tables",
+    "fact_loans": "not among the banking metric registry's approved tables",
+    "gold_column_profile": "data profiling output",
+    "gold_data_quality": "data-quality results",
+    "gold_load_summary": "load bookkeeping",
+    "gold_metadata": "pipeline metadata, not business data",
+    "gold_table_profile": "data profiling output",
+    "snapshot_accounts": "not among the banking metric registry's approved tables",
+    "snapshot_branches": "not among the banking metric registry's approved tables",
+    "snapshot_cards": "not among the banking metric registry's approved tables",
+    "snapshot_customers": "not among the banking metric registry's approved tables",
+    "snapshot_loan_repayments": "not among the banking metric registry's approved tables",
+    "snapshot_loans": "not among the banking metric registry's approved tables",
+    "snapshot_transactions": "not among the banking metric registry's approved tables",
+    "summary_accounts": "not among the banking metric registry's approved tables",
+    "summary_cards": "not among the banking metric registry's approved tables",
+    "summary_customers": "not among the banking metric registry's approved tables",
+    "summary_loan_repayments": "not among the banking metric registry's approved tables",
+    "summary_loans": "not among the banking metric registry's approved tables",
+    "summary_transactions": "not among the banking metric registry's approved tables"
+  }
+}

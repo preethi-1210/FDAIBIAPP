@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     metric_registry_domains: str = "finance,insurance,retail,healthcare"
     # Whether questions those registries cannot represent still go to model-written SQL.
     registry_generated_sql: bool = True
+    # Parsed table and column allowlists for model-written SQL (app/sql_allowlists/).
+    # shadow logs what would be refused; enforce refuses it; off skips the check.
+    sql_allowlist_mode: str = "shadow"
     # Plans and AI allowances. Separate from domain access: a plan never unlocks business data.
     subscriptions_enabled: bool = True
     # False records usage but limits nobody.

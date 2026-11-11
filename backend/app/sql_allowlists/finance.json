@@ -1,0 +1,549 @@
+{
+  "domain": "finance",
+  "source": "finance catalog, information_schema, 2026-11-11",
+  "status": "draft: generated, awaiting review",
+  "reviewed_by": null,
+  "tables": {
+    "agg_accounts_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_cash_balance",
+        "avg_cash_balance"
+      ],
+      "restricted": []
+    },
+    "agg_accounts_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_cash_balance",
+        "avg_cash_balance"
+      ],
+      "restricted": []
+    },
+    "agg_clients_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_clients_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone"
+      ]
+    },
+    "agg_dividends_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_amount_per_share",
+        "avg_amount_per_share"
+      ],
+      "restricted": []
+    },
+    "agg_dividends_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_amount_per_share",
+        "avg_amount_per_share"
+      ],
+      "restricted": []
+    },
+    "agg_prices_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_open",
+        "avg_open",
+        "total_high",
+        "avg_high",
+        "total_low",
+        "avg_low",
+        "total_close",
+        "avg_close",
+        "total_volume",
+        "avg_volume"
+      ],
+      "restricted": []
+    },
+    "agg_prices_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_open",
+        "avg_open",
+        "total_high",
+        "avg_high",
+        "total_low",
+        "avg_low",
+        "total_close",
+        "avg_close",
+        "total_volume",
+        "avg_volume"
+      ],
+      "restricted": []
+    },
+    "agg_trades_daily": {
+      "columns": [
+        "_gold_date",
+        "record_count",
+        "total_price",
+        "avg_price",
+        "total_quantity",
+        "avg_quantity"
+      ],
+      "restricted": []
+    },
+    "agg_trades_monthly": {
+      "columns": [
+        "_gold_month",
+        "record_count",
+        "total_price",
+        "avg_price",
+        "total_quantity",
+        "avg_quantity"
+      ],
+      "restricted": []
+    },
+    "dim_accounts": {
+      "columns": [
+        "client_id",
+        "account_type",
+        "open_date",
+        "status",
+        "cash_balance",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "accounts_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "dim_clients": {
+      "columns": [
+        "client_id",
+        "risk_profile",
+        "kyc_status",
+        "city",
+        "onboarding_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "clients_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "pan_number",
+        "phone",
+        "email"
+      ]
+    },
+    "dim_dividends": {
+      "columns": [
+        "dividend_id",
+        "security_id",
+        "ex_date",
+        "amount_per_share",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "dividends_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "dim_securities": {
+      "columns": [
+        "security_id",
+        "symbol",
+        "security_name",
+        "asset_class",
+        "sector",
+        "exchange",
+        "currency",
+        "listing_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "securities_sk",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_prices": {
+      "columns": [
+        "price_date",
+        "security_id",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": []
+    },
+    "fact_trades": {
+      "columns": [
+        "price",
+        "quantity",
+        "security_id",
+        "settlement_date",
+        "side",
+        "status",
+        "trade_id",
+        "trade_timestamp",
+        "ingestion_timestamp",
+        "source_file",
+        "_silver_processed_timestamp",
+        "_source_table",
+        "_record_hash",
+        "_sensitive_columns",
+        "_gold_processed_timestamp",
+        "_gold_source_table",
+        "_gold_table_type",
+        "_pipeline_layer"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "gold_accounts": {
+      "columns": [
+        "client_id",
+        "account_type",
+        "open_date",
+        "status",
+        "cash_balance",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "gold_clients": {
+      "columns": [
+        "client_id",
+        "risk_profile",
+        "kyc_status",
+        "city",
+        "onboarding_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "pan_number",
+        "phone",
+        "email"
+      ]
+    },
+    "gold_dividends": {
+      "columns": [
+        "dividend_id",
+        "security_id",
+        "ex_date",
+        "amount_per_share",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_prices": {
+      "columns": [
+        "price_date",
+        "security_id",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_securities": {
+      "columns": [
+        "security_id",
+        "symbol",
+        "security_name",
+        "asset_class",
+        "sector",
+        "exchange",
+        "currency",
+        "listing_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": []
+    },
+    "gold_trades": {
+      "columns": [
+        "price",
+        "quantity",
+        "security_id",
+        "settlement_date",
+        "side",
+        "status",
+        "trade_id",
+        "trade_timestamp",
+        "ingestion_timestamp",
+        "source_file",
+        "_gold_processed_timestamp",
+        "_gold_source"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "snapshot_accounts": {
+      "columns": [
+        "client_id",
+        "account_type",
+        "open_date",
+        "status",
+        "cash_balance",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "snapshot_clients": {
+      "columns": [
+        "client_id",
+        "risk_profile",
+        "kyc_status",
+        "city",
+        "onboarding_date",
+        "updated_at",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "first_name",
+        "last_name",
+        "dob",
+        "pan_number",
+        "phone",
+        "email"
+      ]
+    },
+    "snapshot_dividends": {
+      "columns": [
+        "dividend_id",
+        "security_id",
+        "ex_date",
+        "amount_per_share",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_prices": {
+      "columns": [
+        "price_date",
+        "security_id",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_securities": {
+      "columns": [
+        "security_id",
+        "symbol",
+        "security_name",
+        "asset_class",
+        "sector",
+        "exchange",
+        "currency",
+        "listing_date",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": []
+    },
+    "snapshot_trades": {
+      "columns": [
+        "price",
+        "quantity",
+        "security_id",
+        "settlement_date",
+        "side",
+        "status",
+        "trade_id",
+        "trade_timestamp",
+        "ingestion_timestamp",
+        "source_file",
+        "_snapshot_date",
+        "_snapshot_timestamp"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "summary_accounts": {
+      "columns": [
+        "total_cash_balance",
+        "avg_cash_balance",
+        "min_cash_balance",
+        "max_cash_balance"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    },
+    "summary_clients": {
+      "columns": [
+        "client_id"
+      ],
+      "restricted": [
+        "total_phone",
+        "avg_phone",
+        "min_phone",
+        "max_phone"
+      ]
+    },
+    "summary_dividends": {
+      "columns": [
+        "dividend_id",
+        "total_amount_per_share",
+        "avg_amount_per_share",
+        "min_amount_per_share",
+        "max_amount_per_share"
+      ],
+      "restricted": []
+    },
+    "summary_prices": {
+      "columns": [
+        "security_id",
+        "total_open",
+        "avg_open",
+        "min_open",
+        "max_open",
+        "total_high",
+        "avg_high",
+        "min_high",
+        "max_high",
+        "total_low",
+        "avg_low",
+        "min_low",
+        "max_low",
+        "total_close",
+        "avg_close",
+        "min_close",
+        "max_close",
+        "total_volume",
+        "avg_volume",
+        "min_volume",
+        "max_volume"
+      ],
+      "restricted": []
+    },
+    "summary_trades": {
+      "columns": [
+        "total_price",
+        "avg_price",
+        "min_price",
+        "max_price",
+        "total_quantity",
+        "avg_quantity",
+        "min_quantity",
+        "max_quantity"
+      ],
+      "restricted": [
+        "account_id"
+      ]
+    }
+  },
+  "excluded_tables": {
+    "gold_column_profile": "data profiling output",
+    "gold_data_quality": "data-quality results",
+    "gold_load_summary": "load bookkeeping",
+    "gold_metadata": "pipeline metadata, not business data",
+    "gold_table_profile": "data profiling output"
+  }
+}
