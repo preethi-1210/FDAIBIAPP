@@ -43,9 +43,20 @@ type Dash = {
   domain: DashDomain;
   domain_label: string;
   metric_name: string;
+  metric_description?: string;
   volume: number;
+  active_cash_balance?: number | null;
+  active_cash_balance_description?: string;
   events: number;
   event_label?: string;
+  event_description?: string;
+  trend_title?: string;
+  trend_description?: string;
+  trend_value_label?: string;
+  trend_event_label?: string;
+  live_title?: string;
+  live_description?: string;
+  live_section_title?: string;
   customers: number | null;
   customer_label?: string;
   churn_rate: number | null;
@@ -109,6 +120,8 @@ export default function DashboardPage() {
       typeof row.value === "number" && Number.isFinite(row.value),
     );
   const recentStatuses = data ? summarizeStatuses(data.live) : [];
+  const trendValueLabel = data?.trend_value_label || (data?.domain === "banking" ? "Total Deposits & Accounts" : data?.metric_name);
+  const trendEventLabel = data?.trend_event_label || data?.event_label || "Events";
   const hasBusinessData = Boolean(
     data && (data.volume || data.events || data.by_month.length || data.by_region.length || data.live.length),
   );
@@ -246,19 +259,28 @@ export default function DashboardPage() {
               </div>
             ) : data ? (
               <>
-                <div className="dashboard-kpis">
+                <div className={`dashboard-kpis${data.active_cash_balance != null ? " dashboard-kpis--seven" : ""}`}>
                   <Kpi
                     icon={CircleDollarSign}
                     label={data.domain === "banking" ? "Total Deposits & Accounts" : data.metric_name}
                     value={formatAmount(data.volume)}
-                    detail={data.domain === "banking" ? "Current authorized account balance" : "Total for the authorized domain"}
+                    detail={data.domain === "banking" ? "Current authorized account balance" : data.metric_description || "Total for the authorized domain"}
                     color="#7027F2"
                   />
+                  {data.active_cash_balance != null ? (
+                    <Kpi
+                      icon={CircleDollarSign}
+                      label="Active-account cash balance"
+                      value={formatAmount(data.active_cash_balance)}
+                      detail={data.active_cash_balance_description || ""}
+                      color="#7027F2"
+                    />
+                  ) : null}
                   <Kpi
                     icon={Activity}
                     label={data.domain === "banking" ? "Events" : data.event_label || "Events"}
                     value={String(data.events)}
-                    detail={data.domain === "banking" ? "Active accounts in the source" : "Recorded business events"}
+                    detail={data.domain === "banking" ? "Active accounts in the source" : data.event_description || "Recorded business events"}
                     color="#7027F2"
                   />
                   <Kpi
@@ -296,13 +318,13 @@ export default function DashboardPage() {
                   {tab === "overview" ? (
                     <>
                       <div className="dashboard-grid">
-                        <Card title="Trend" subtitle={`Business performance · ${rangeLabel(dateRange)} of available data${latestMonth ? ` (through ${latestMonth})` : ""}`} actions={
+                        <Card title={data.trend_title || "Trend"} subtitle={`${data.trend_description || "Business performance"} · ${rangeLabel(dateRange)} of available data${latestMonth ? ` (through ${latestMonth})` : ""}`} actions={
                           <div className="dashboard-trend-controls">
                             <label className="dashboard-card-select">
                               <span className="sr-only">Trend metric</span>
                               <select value={trendMetric} onChange={(event) => setTrendMetric(event.target.value as "value" | "events")}>
-                                <option value="value">{data.domain === "banking" ? "Total Deposits & Accounts" : data.metric_name}</option>
-                                <option value="events">{data.event_label || "Events"}</option>
+                                <option value="value">{trendValueLabel}</option>
+                                <option value="events">{trendEventLabel}</option>
                               </select>
                             </label>
                             <div className="dashboard-period-switch" role="group" aria-label="Trend period">
@@ -314,8 +336,8 @@ export default function DashboardPage() {
                             </div>
                           </div>
                         }>
-                          <p className="dashboard-chart-caption">{trendMetric === "events" ? data.event_label || "Events" : data.domain === "banking" ? "Total Deposits & Accounts" : data.metric_name}</p>
-                          <LineChart data={chartTrendData} colors={colors} label={trendMetric === "events" ? data.event_label || "Events" : data.metric_name} />
+                          <p className="dashboard-chart-caption">{trendMetric === "events" ? trendEventLabel : trendValueLabel}</p>
+                          <LineChart data={chartTrendData} colors={colors} label={trendMetric === "events" ? trendEventLabel : data.trend_value_label || data.metric_name} />
                         </Card>
                         <Card
                           title="Mix"
@@ -401,7 +423,7 @@ export default function DashboardPage() {
                             </div>
                           )}
                         </Card>
-                        <Card title="Live activity" subtitle="Recent events from the authorized source" actions={
+                        <Card title={data.live_title || "Live activity"} subtitle={data.live_description || "Recent events from the authorized source"} actions={
                           <div className="dashboard-live-heading-actions">
                             <span className="dashboard-live-badge"><span />Live</span>
                             {data.updated_at ? <time className="dashboard-live-updated" dateTime={data.updated_at}>Updated {formatTimestamp(data.updated_at)}</time> : null}
@@ -413,7 +435,7 @@ export default function DashboardPage() {
                         }>
                           <div className="dashboard-live-activity">
                             <div className="dashboard-live-activity__feed" aria-label="Recent activity events">
-                              <p className="dashboard-live-section-title"><Clock3 size={13} /> Recent events</p>
+                              <p className="dashboard-live-section-title"><Clock3 size={13} /> {data.live_section_title || "Recent events"}</p>
                               {data.live.map((event, index) => (
                                 <div className="live-row" key={`${event.label}-${event.created_at}-${index}`}>
                                   <span className="live-row__icon" style={{ "--event-accent": colors[index % colors.length] } as React.CSSProperties} aria-hidden="true">

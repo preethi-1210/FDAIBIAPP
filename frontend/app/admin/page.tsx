@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Check,
   ClipboardList,
+  CreditCard,
   Inbox,
   LayoutDashboard,
   LoaderCircle,
@@ -13,10 +14,11 @@ import {
   X,
 } from "lucide-react";
 import { type AccessRequest, formatWhen, StatusPill } from "@/components/AccessUi";
+import { AdminSubscriptions } from "@/components/AdminSubscriptions";
 import { DOMAIN_LABELS, Shell } from "@/components/Shell";
 import { api, switchDomain } from "@/lib/api";
 
-type Tab = "overview" | "requests" | "users" | "audit";
+type Tab = "overview" | "requests" | "users" | "audit" | "subscriptions";
 type RequestFilter = "pending" | "approved" | "rejected" | "all";
 type AuditEvent = {
   id: number;
@@ -95,7 +97,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get("tab");
-    if (requested === "requests" || requested === "users" || requested === "audit") setTab(requested);
+    if (requested === "requests" || requested === "users" || requested === "audit" || requested === "subscriptions") setTab(requested);
     void load();
   }, [load]);
 
@@ -131,6 +133,7 @@ export default function AdminPage() {
     { id: "requests", label: "Access requests", icon: Inbox, count: pendingCount },
     { id: "users", label: "Users & permissions", icon: UsersRound },
     { id: "audit", label: "Audit history", icon: ClipboardList },
+    { id: "subscriptions", label: "Plans & AI usage", icon: CreditCard },
   ];
 
   return (
@@ -206,6 +209,8 @@ export default function AdminPage() {
           <RequestsPanel requests={requests} busyKey={busyKey} run={run} />
         ) : tab === "users" ? (
           <UsersPanel users={users} busyKey={busyKey} run={run} />
+        ) : tab === "subscriptions" ? (
+          <AdminSubscriptions />
         ) : (
           <section className="access-card" aria-labelledby="audit-heading">
             <h2 id="audit-heading">Audit history</h2>

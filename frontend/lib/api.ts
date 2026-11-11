@@ -6,6 +6,13 @@ export function token(): string | null {
   return localStorage.getItem("ryze_token");
 }
 
+/** An Error that also says which status it was, so a caller can tell a plan limit from a fault. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
@@ -35,7 +42,7 @@ export async function api<T>(
       localStorage.removeItem("ryze_role");
       window.location.href = "/login";
     }
-    throw new Error(body.detail || `Request failed (${res.status})`);
+    throw new ApiError(body.detail || `Request failed (${res.status})`, res.status);
   }
   return res.json();
 }

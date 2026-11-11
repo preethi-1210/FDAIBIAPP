@@ -28,14 +28,16 @@ import {
   X,
 } from "lucide-react";
 import { ResultWorkspace } from "@/components/ResultWorkspace";
-import { API_URL, api } from "@/lib/api";
+import { API_URL, ApiError, api } from "@/lib/api";
+import { PlanMenuLink, PlanNotices, PlanUsageCard, UpgradePrompt, usePlanUsage } from "@/components/PlanUsage";
+import type { PlanUsage } from "@/lib/subscription";
 import {
   detectSensitivePrompt,
   sensitivePromptNotice,
   SENSITIVE_DEMO_PROMPTS,
 } from "@/lib/sensitive-data";
 
-type Result = Parameters<typeof ResultWorkspace>[0]["result"] & { conversation_id?: string | null };
+type Result = Parameters<typeof ResultWorkspace>[0]["result"] & { conversation_id?: string | null; usage?: PlanUsage | null };
 type HistoryItem = {
   id: number;
   question: string;
@@ -72,6 +74,7 @@ const STATUS_LABELS: Record<string, string> = {
   complete: "Analysis complete",
   no_data: "No matching data",
   insufficient_data: "Insufficient data",
+  insufficient_history: "Insufficient history",
   needs_clarification: "Clarification needed",
   awaiting_review: "Awaiting administrator review",
   error: "Could not complete",
@@ -164,6 +167,8 @@ export default function ChatPage() {
   const [renameValue, setRenameValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [planLimit, setPlanLimit] = useState("");
+  const planUsage = usePlanUsage();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -312,6 +317,7 @@ export default function ChatPage() {
     const selectedConversation = activeConversation;
     setBusy(true);
     setError("");
+    setPlanLimit("");
     try {
       const result = await api<Result>("/query", {
         method: "POST",
@@ -322,10 +328,17 @@ export default function ChatPage() {
         }),
       });
       applyResult(selectedConversation, submitted, result);
+      planUsage.update(result.usage);
+      setPlanLimit(result.usage?.limited_by_plan ?? "");
       setQuestion("");
       setSidebarOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The analysis could not be completed.");
+      if (cause instanceof ApiError && cause.status === 402) {
+        setPlanLimit(cause.message);
+        void planUsage.refresh();
+      } else {
+        setError(cause instanceof Error ? cause.message : "The analysis could not be completed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -457,6 +470,7 @@ export default function ChatPage() {
                 </select>
                 <ChevronDown size={13} />
               </label>
+              <PlanMenuLink usage={planUsage.usage} />
               <button type="button" onClick={signOut}>Sign out</button>
             </div>
           </details>
@@ -541,6 +555,7 @@ export default function ChatPage() {
           </section>
         </div>
 
+        <PlanUsageCard usage={planUsage.usage} />
         <div className="chat-sidebar__footer">
           <div className="chat-user-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
           <div className="chat-user-details"><b>{username || "Analyst"}</b><span>{domain}</span></div>
@@ -686,6 +701,8 @@ export default function ChatPage() {
         </AnimatePresence>
 
         <div className="chat-composer-zone">
+          <PlanNotices notices={planUsage.usage?.notices ?? []} onDismiss={planUsage.dismiss} />
+          {planLimit ? <UpgradePrompt message={planLimit} onClose={() => setPlanLimit("")} /> : null}
           <AnimatePresence>
             {error && (
               <motion.div className="chat-error" role="alert" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}>

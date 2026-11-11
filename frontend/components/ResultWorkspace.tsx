@@ -44,6 +44,9 @@ type Result = {
 };
 
 const STAGE_LABELS: Record<string, string> = {
+  input_policy: "Input check",
+  router: "Routing",
+  tool: "Governed tool",
   planner: "Planner",
   sql_generation: "SQL generation",
   sql_validation: "SQL validation",

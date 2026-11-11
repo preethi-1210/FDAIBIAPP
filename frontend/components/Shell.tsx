@@ -5,6 +5,7 @@ import { BarChart3, ChevronDown } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, API_URL, switchDomain } from "@/lib/api";
+import { PlanMenuLink } from "@/components/PlanUsage";
 
 const links = [
   { href: "/context", label: "Foresight" },
@@ -139,6 +140,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <small>Role: {role === "admin" ? "Administrator" : "Business user"}</small>
               <small>Active domain: {DOMAIN_LABELS[domain] ?? (domain || "Workspace")}</small>
               <small>Authorized: {domains.map((item) => DOMAIN_LABELS[item] ?? item).join(", ") || "—"}</small>
+              <PlanMenuLink />
               {switchError ? <small role="alert" className="access-error-text">{switchError}</small> : null}
               <button type="button" onClick={signOut}>Sign out</button>
             </div>
