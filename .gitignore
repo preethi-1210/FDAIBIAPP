@@ -1,4 +1,16 @@
 backend/.venv/
+# Dumps, editor copies and build state must never be committed.
+*.backup
+*.dump
+*.bak
+*.bak.*
+*.bak_*
+*.bak[0-9]*
+backup_finance_*/
+*.tsbuildinfo
+# Local data imports and editor settings.
+banking_import/
+frontend/.vscode/
 .venv/
 backend/ryze_bi.db
 backend/.chroma/
