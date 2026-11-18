@@ -1,0 +1,46 @@
+# Ryze Infinity reverse proxy. Caddy obtains and renews the HTTPS certificates itself.
+# Installed to /etc/caddy/Caddyfile by provision.sh. Validate with: caddy validate --config /etc/caddy/Caddyfile
+
+# The bare domain only redirects to www.
+ryzeaibiapp.com {
+	redir https://www.ryzeaibiapp.com{uri} permanent
+}
+
+www.ryzeaibiapp.com {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		-Server
+	}
+
+	# FastAPI's interactive docs, schema and Prometheus metrics stay private; they remain
+	# reachable on the server itself at 127.0.0.1:8013.
+	@private_api path /api/docs /api/docs/* /api/redoc /api/openapi.json /api/metrics
+	respond @private_api 404
+
+	# The API serves its routes at the root (/auth, /query, /me ...). handle_path removes the
+	# /api prefix, so no backend route or API contract changes.
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:8013 {
+			# Ask AI streams NDJSON progress; send each line as soon as it is written.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	log {
+		output file /var/log/caddy/ryze-access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format json
+	}
+}

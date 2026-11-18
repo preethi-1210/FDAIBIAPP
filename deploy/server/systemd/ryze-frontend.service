@@ -1,0 +1,33 @@
+[Unit]
+Description=Ryze Infinity web app (Next.js)
+After=network-online.target ryze-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryze
+Group=ryze
+WorkingDirectory=/opt/ryze/current/frontend
+EnvironmentFile=/opt/ryze/shared/frontend.env
+Environment=HOME=/opt/ryze/shared/home
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+# Bound to localhost; Caddy is the only public entry point.
+ExecStart=/opt/ryze/current/frontend/node_modules/.bin/next start -H 127.0.0.1 -p 3000
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# .next/cache in each release links here; releases themselves stay read-only.
+ReadWritePaths=/opt/ryze/shared/home /opt/ryze/shared/next-cache
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

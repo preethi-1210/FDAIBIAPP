@@ -1,0 +1,145 @@
+name: Deploy production
+
+# Deploys https://www.ryzeaibiapp.com from the release branch. Every CI check must pass first, and
+# the `production` environment can require a manual approval before the server is touched
+# (Settings > Environments > production > Required reviewers).
+
+on:
+  push:
+    branches: [feature/agentic_ai_mode]
+  workflow_dispatch:
+
+# Deployment lock: one deployment at a time; a newer run waits instead of cancelling a deploy
+# that is already changing the server. The server also takes its own lock (flock).
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SITE_URL: ${{ vars.PUBLIC_SITE_URL || 'https://www.ryzeaibiapp.com' }}
+  APP_PATH: ${{ vars.PRODUCTION_APP_PATH || '/opt/ryze' }}
+
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.id.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: id
+        run: echo "release_id=$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          # Public value (the browser calls it); compiled into the build.
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || 'https://www.ryzeaibiapp.com/api' }}
+        run: |
+          npm ci
+          npm run build
+      - name: Package release
+        run: |
+          mkdir -p release/frontend release/backend
+          # Frontend: the compiled build plus what `next start` needs; dependencies are
+          # installed on the server for its own CPU architecture.
+          cp -r frontend/.next release/frontend/.next
+          rm -rf release/frontend/.next/cache
+          cp frontend/package.json frontend/package-lock.json frontend/next.config.ts release/frontend/
+          # Backend: application code only. No tests, local databases, env files or backups.
+          cp -r backend/app backend/migrations backend/knowledge backend/sql release/backend/
+          cp backend/requirements.txt backend/alembic.ini backend/create_user.py backend/set_user_role.py backend/purge_history.py release/backend/
+          find release/backend -name '__pycache__' -type d -prune -exec rm -rf {} +
+          cp -r deploy release/deploy
+          echo "${GITHUB_SHA}" > release/REVISION
+          tar -czf "ryze-${{ steps.id.outputs.release_id }}.tar.gz" -C release .
+          # Defence in depth: refuse to ship anything that looks like an env file or database.
+          if tar -tzf "ryze-${{ steps.id.outputs.release_id }}.tar.gz" | grep -E '(^|/)\.env($|\.)|\.db$|\.dump$' | grep -v '\.env\.example$'; then
+            echo "Release contains a file that must not ship." >&2; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: ryze-${{ steps.id.outputs.release_id }}.tar.gz
+          retention-days: 14
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_SITE_URL || 'https://www.ryzeaibiapp.com' }}
+    env:
+      RELEASE_ID: ${{ needs.build.outputs.release_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PRODUCTION_HOST }}
+          PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          USER_NAME: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          for name in SSH_KEY KNOWN_HOSTS HOST USER_NAME; do
+            [ -n "${!name}" ] || { echo "Missing deployment secret for ${name}. See docs/deployment/GITHUB_SECRETS.md." >&2; exit 1; }
+          done
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          # Pinned host key: the connection fails rather than trusting an unknown server.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host production
+            HostName ${HOST}
+            Port ${PORT}
+            User ${USER_NAME}
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            BatchMode yes
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+      - name: Upload release
+        run: |
+          scp -q "ryze-${RELEASE_ID}.tar.gz" "production:/tmp/ryze-${RELEASE_ID}.tar.gz"
+          ssh production "set -e; d='${APP_PATH}/releases/${RELEASE_ID}'; mkdir -p \"\$d\"; tar -xzf '/tmp/ryze-${RELEASE_ID}.tar.gz' -C \"\$d\"; rm -f '/tmp/ryze-${RELEASE_ID}.tar.gz'"
+      - name: Install, switch and health-check (rolls back automatically on failure)
+        run: ssh production "APP_ROOT='${APP_PATH}' bash '${APP_PATH}/releases/${RELEASE_ID}/deploy/scripts/deploy_release.sh' '${RELEASE_ID}'"
+      - name: Verify public HTTPS
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 15 -o /dev/null "${SITE_URL}/login" && curl -fsS --max-time 15 "${SITE_URL}/api/health" | grep -q '"status":"ok"'; then
+              echo "Public site and API are healthy over HTTPS."; exit 0
+            fi
+            sleep 10
+          done
+          echo "The server reported healthy, but ${SITE_URL} is not reachable over HTTPS. Check DNS, the Oracle security list and Caddy." >&2
+          exit 1
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "## Production deployment"
+            echo "- Release: \`${RELEASE_ID}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Result: ${{ job.status }}"
+            echo "- Site: ${SITE_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove SSH material
+        if: always()
+        run: rm -rf ~/.ssh

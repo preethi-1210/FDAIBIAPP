@@ -1,0 +1,4 @@
+# Server files run on Linux: always check them out with LF line endings, even on Windows.
+*.sh text eol=lf
+deploy/** text eol=lf
+.github/workflows/*.yml text eol=lf

@@ -1,0 +1,78 @@
+name: Security checks
+
+# Report-only: known findings exist (see docs/deployment/DEPLOYMENT.md, "Known security findings"),
+# several in the authentication library chain that is out of scope for change. Results appear in
+# the job summary; they do not block deployment. Make a step blocking by removing its
+# `continue-on-error` once its findings are resolved.
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feature/**"]
+  schedule:
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Gitleaks CLI (MIT), pinned; scans the full history for committed credentials.
+      # This one blocks: a committed secret must be rotated, not ignored.
+      - name: Secret scan
+        env:
+          GITLEAKS_VERSION: "8.24.2"
+        run: |
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 1 .
+
+  python-dependencies:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - name: pip-audit
+        run: |
+          pip-audit -r backend/requirements.txt --progress-spinner off -f markdown --output audit.md || status=$?
+          { echo "## Python dependency audit"; cat audit.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+
+  node-dependencies:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm audit
+        run: |
+          npm audit --audit-level=high || status=$?
+          { echo "## Node dependency audit"; echo '```'; npm audit --omit=dev || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+
+  python-code:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install bandit
+      # High-severity, high-confidence issues only.
+      - name: Bandit
+        run: bandit -r backend/app -lll -iii

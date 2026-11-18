@@ -1,0 +1,35 @@
+[Unit]
+Description=Ryze Infinity API (FastAPI / Uvicorn)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryze
+Group=ryze
+WorkingDirectory=/opt/ryze/current/backend
+EnvironmentFile=/opt/ryze/shared/backend.env
+Environment=HOME=/opt/ryze/shared/home
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# One worker: rate limits and request replay are counted per process until a shared cache
+# (Garnet) is validated. One worker comfortably serves five users.
+ExecStart=/opt/ryze/current/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8013 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+
+# Hardening: code is read-only to the service; it may write only under /opt/ryze/shared.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ryze/shared/home /opt/ryze/shared/data /opt/ryze/shared/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

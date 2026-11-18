@@ -1,0 +1,12 @@
+# Installed to /etc/logrotate.d/ryze. Service output goes to journald (see journald.conf limits);
+# this covers the deployment and health-check logs written under /opt/ryze/shared/logs.
+/opt/ryze/shared/logs/*.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root ryze
+}
