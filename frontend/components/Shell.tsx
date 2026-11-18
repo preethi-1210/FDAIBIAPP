@@ -14,6 +14,9 @@ const links = [
   { href: "/settings", label: "Connect" },
 ];
 
+/** Dispatched on window after a page switches the session's domain without reloading. */
+export const DOMAIN_CHANGED_EVENT = "ryze:domain-changed";
+
 export const DOMAIN_LABELS: Record<string, string> = {
   banking: "Banking",
   finance: "Finance",
@@ -45,18 +48,23 @@ export function Shell({ children }: { children: React.ReactNode }) {
     setUsername(localStorage.getItem("ryze_user") || "");
     setDomain(localStorage.getItem("ryze_domain") || "");
     // Role and authorized domains always come from the API, never from browser storage.
-    api<Me>("/me")
-      .then((user) => {
-        setUsername(user.username);
-        setDomain(user.domain);
-        setRole(user.role);
-        setDomains(user.authorized_domains ?? [user.domain]);
-        setNotifications(user.notifications ?? 0);
-      })
-      .catch(() => {
-        setUsername(localStorage.getItem("ryze_user") || "");
-        setDomain(localStorage.getItem("ryze_domain") || "");
-      });
+    const loadMe = () =>
+      api<Me>("/me")
+        .then((user) => {
+          setUsername(user.username);
+          setDomain(user.domain);
+          setRole(user.role);
+          setDomains(user.authorized_domains ?? [user.domain]);
+          setNotifications(user.notifications ?? 0);
+        })
+        .catch(() => {
+          setUsername(localStorage.getItem("ryze_user") || "");
+          setDomain(localStorage.getItem("ryze_domain") || "");
+        });
+    void loadMe();
+    // A page that switches domain in place (the dashboard) announces it, so the menu shows the new domain.
+    window.addEventListener(DOMAIN_CHANGED_EVENT, loadMe);
+    return () => window.removeEventListener(DOMAIN_CHANGED_EVENT, loadMe);
   }, [pathname]);
 
   async function changeDomain(next: string) {

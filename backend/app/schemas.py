@@ -96,7 +96,7 @@ class QueryResponse(BaseModel):
     hitl: Optional[dict[str, Any]] = None
     model_gov: Optional[dict[str, Any]] = None
     conversation_id: UUID | None = None
-    # complete | no_data | insufficient_data | needs_clarification | awaiting_review | error
+    # complete | no_data | insufficient_data | needs_clarification | awaiting_review | out_of_scope | error
     status: str = "complete"
     # Which engine actually handled each stage (planner, SQL, execution, prediction, synthesis).
     trace: list[dict[str, Any]] = Field(default_factory=list)
@@ -104,6 +104,8 @@ class QueryResponse(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
     # Plan allowance after this request: credits charged, percent used, new notices. Never provider quota.
     usage: Optional[dict[str, Any]] = None
+    # Business-friendly answer card: display names, filters, freshness and validation outcome.
+    presentation: Optional[dict[str, Any]] = None
 
 
 class ReportPeriod(BaseModel):

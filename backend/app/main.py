@@ -1,4 +1,7 @@
+import contextvars
+import json
 import logging
+import queue
 import re
 import secrets
 import time
@@ -21,7 +24,8 @@ from authlib.common.errors import AuthlibBaseError
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from joserfc.errors import JoseError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -51,7 +55,7 @@ from .config import settings
 from .db import SessionLocal, engine, get_db
 from .deployment import allows_http_urls, cookie_secure, enforce_startup_policy
 from .domains import DEMO_USERS, DOMAINS, DOMAIN_LABELS, PROMPTS
-from .llm import provider_status
+from .llm import progress_listener, provider_status
 from .models import (
     AppUser,
     Conversation,
@@ -81,17 +85,21 @@ from .sensitive_data import (
     sanitize_sensitive_rows,
 )
 from .domains import finance_gold_glossary
+from .services.banking_context import glossary_for_postgres_shape as banking_gold_glossary
 from .seed import apply_postgres_routines, ensure_schema, seed_if_empty
 from .subscription_api import router as subscription_router
 from .services.guardrail import GuardrailError
 from .services.observability import JsonFormatter, RedactingFilter, render_prometheus
 from .services.orchestrator import Orchestrator
+from .services.presentation import for_viewer, scrub_text
 from .services.reports import get_report
 from .access_api import router as access_router
-from .services.access import domains_for, notification_count
+from .services.access import authorize_context_domain, domains_for, notification_count
+from .services import foresight
 from .warehouse import (
     close_warehouse_sessions,
     databricks_domain_catalog,
+    databricks_healthcare_tenant_catalog,
     test_warehouse_connection,
     verify_warehouse_domain,
     warehouse_status,
@@ -704,6 +712,20 @@ def query(
     user: AuthUser = Depends(get_current_user),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=120),
 ) -> QueryResponse:
+    try:
+        return for_viewer(_answer_query(body, db, user, idempotency_key), user.role)
+    except HTTPException as exc:
+        raise _for_viewer_error(exc, user) from exc
+
+
+def _for_viewer_error(exc: HTTPException, user: AuthUser) -> HTTPException:
+    """A refusal as a business user may read it: no physical catalog, schema or table names."""
+    if user.role == "admin" or not isinstance(exc.detail, str):
+        return exc
+    return HTTPException(status_code=exc.status_code, detail=scrub_text(exc.detail, user.domain), headers=exc.headers)
+
+
+def _answer_query(body: QueryRequest, db: Session, user: AuthUser, idempotency_key: str | None) -> QueryResponse:
     if rate_limit_exceeded("query", user.username, settings.rate_limit_query_per_minute):
         raise HTTPException(
             status_code=429,
@@ -770,6 +792,56 @@ def query(
     if replay_key:
         _idempotent_responses.set(replay_key, response, 300)
     return response
+
+
+@app.post("/query/stream")
+def query_stream(
+    body: QueryRequest,
+    request: Request,
+    user: AuthUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=120),
+) -> StreamingResponse:
+    """The same governed analysis as POST /query, streamed as newline-delimited JSON.
+
+    Events: {"type": "phase", "phase": "connected"} once the request is accepted, {"type": "step",
+    "stage", "ok"} as each workflow stage is recorded, then exactly one {"type": "result", "data"} or
+    {"type": "error", "status", "detail"}. Step events name the stage only: engines, models and
+    details stay in the audited trace. A client that disconnects does not stop or roll back the
+    analysis; it is still saved to history.
+    """
+    events: "queue.Queue[dict | None]" = queue.Queue()
+    # The session comes from the same dependency as every other route, so overrides still apply.
+    session_factory = request.app.dependency_overrides.get(get_db, get_db)
+
+    def work() -> None:
+        sessions = session_factory()
+        db = next(sessions)
+        try:
+            with progress_listener(events.put):
+                response = for_viewer(_answer_query(body, db, user, idempotency_key), user.role)
+            events.put({"type": "result", "data": jsonable_encoder(response)})
+        except HTTPException as exc:
+            exc = _for_viewer_error(exc, user)
+            events.put({"type": "error", "status": exc.status_code, "detail": exc.detail})
+        except Exception:
+            logger.exception("Streamed analysis failed")
+            events.put({"type": "error", "status": 500, "detail": "The analysis could not be completed."})
+        finally:
+            sessions.close()
+            events.put(None)
+
+    # Copying the context keeps the request ID and logging fields on the worker thread.
+    Thread(target=contextvars.copy_context().run, args=(work,), daemon=True, name="ask-stream").start()
+
+    def stream():
+        while (event := events.get()) is not None:
+            yield json.dumps(event, default=str) + "\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 app.include_router(subscription_router)
@@ -948,16 +1020,46 @@ def monitor(
         "guardrail_blocks": scoped_history.filter(QueryHistory.guardrail_ok == 0).count(),
         "pending_reviews": pending_reviews.count(),
         "ratings": None,
-        "activities": [
-            {
-                "audit_id": row.audit_id or f"AU-{row.id}",
-                "question": row.question,
-                "status": "passed" if row.guardrail_ok else "blocked",
-                "rows": row.row_count,
-                "created_at": str(row.created_at),
-            }
-            for row in rows
-        ],
+        "activities": [_monitor_activity(row) for row in rows],
+    }
+
+
+# Why a question that read no data table did not pass, in business terms.
+_NO_DATA_REASONS = {
+    "out_of_scope": "Outside your business data",
+    "needs_clarification": "Needed clarification",
+    "insufficient_data": "No approved data source",
+    "insufficient_history": "Not enough history",
+}
+
+
+def _monitor_activity(row: QueryHistory) -> dict:
+    """One Monitor row. `passed` means the question was answered from the domain's data tables;
+    an audit reference is listed only when source data was queried or a guardrail stopped it."""
+    try:
+        stored = json.loads(row.result_json or "{}")
+    except (TypeError, ValueError):
+        stored = {}
+    outcome = stored.get("status") if isinstance(stored, dict) else None
+    queried_tables = bool(row.sql and row.tables_used)
+    if not row.guardrail_ok:
+        status, reason = "blocked", "Stopped by a guardrail"
+    elif outcome == "error":
+        status, reason = "failed", "Query failed"
+    elif not queried_tables:
+        status, reason = "failed", _NO_DATA_REASONS.get(outcome or "", "No data tables used")
+    elif outcome == "awaiting_review":
+        status, reason = "review", "Awaiting human review"
+    else:
+        status, reason = "passed", None
+    has_audit = queried_tables or not row.guardrail_ok
+    return {
+        "audit_id": (row.audit_id or f"AU-{row.id}") if has_audit else None,
+        "question": row.question,
+        "status": status,
+        "reason": reason,
+        "rows": row.row_count,
+        "created_at": str(row.created_at),
     }
 
 
@@ -986,15 +1088,24 @@ def history(db: Session = Depends(get_db), user: AuthUser = Depends(get_current_
                 continue
             restricted_output = has_restricted_columns(result.table)
             result.table = sanitize_sensitive_rows(result.table, user.role)
+            result = for_viewer(result, user.role)
         else:
             restricted_output = False
+        technical = user.role == "admin"
+        if restricted_output and not technical:
+            answer = "Sensitive fields are restricted for your account."
+        elif technical:
+            answer = row.answer
+        else:
+            answer = result.answer if result else scrub_text(row.answer, user.domain)
         items.append({
             "id": row.id,
             "audit_id": row.audit_id,
             "question": row.question,
-            "answer": "Sensitive fields are restricted for your account." if restricted_output and user.role != "admin" else row.answer,
-            "sql": row.sql,
-            "tables_used": row.tables_used.split(",") if row.tables_used else [],
+            "answer": answer,
+            # SQL and physical table names are technical detail for administrators only.
+            "sql": row.sql if technical else None,
+            "tables_used": (row.tables_used.split(",") if row.tables_used else []) if technical else [],
             "row_count": row.row_count,
             "guardrail_ok": bool(row.guardrail_ok),
             "result": result,
@@ -1027,6 +1138,7 @@ def replay_history(
             raise HTTPException(status_code=403, detail="This saved result contains prohibited payment data and cannot be replayed.")
         restricted_output = has_restricted_columns(response.table)
         response.table = sanitize_sensitive_rows(response.table, user.role)
+        response = for_viewer(response, user.role)
         if restricted_output and user.role != "admin":
             response.answer = "Sensitive fields are restricted for your account."
         return response
@@ -1035,7 +1147,7 @@ def replay_history(
     row.sql = response.sql
     row.result_json = response.model_dump_json()
     db.commit()
-    return response
+    return for_viewer(response, user.role)
 
 
 def _serialize_review(row: HitlReview) -> dict:
@@ -1110,7 +1222,7 @@ def hitl_resume(
         ConversationMessage(conversation_id=str(conversation_id), role="assistant", content=response.answer),
     ])
     db.commit()
-    return response
+    return for_viewer(response, user.role)
 
 
 @app.post("/hitl/{item_id}/{action}")
@@ -1186,25 +1298,13 @@ def user_context(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     permitted_domains = domains_for(db, user)
-    selected_domain = domain or user.domain
-    if selected_domain not in permitted_domains:
-        raise HTTPException(status_code=403, detail="This user cannot view context for that business domain.")
-    if selected_domain == "healthcare" and user.domain != "healthcare":
-        assignment = (
-            db.query(UserDomainTenant)
-            .filter(
-                UserDomainTenant.username == user.username,
-                UserDomainTenant.domain == "healthcare",
-            )
-            .one_or_none()
-        )
-        if assignment is None:
-            raise HTTPException(status_code=403, detail="This user has no administrator-provisioned Healthcare tenant.")
+    selected_domain, _tenant_id = authorize_context_domain(db, user, domain)
 
     graph = orchestrator.graph
+    gold_glossaries = {"finance": finance_gold_glossary, "banking": banking_gold_glossary}
     domain_glossary = (
-        [Glossary(**row) for row in finance_gold_glossary()]
-        if selected_domain == "finance" and settings.warehouse == "databricks"
+        [Glossary(**row) for row in gold_glossaries[selected_domain]()]
+        if selected_domain in gold_glossaries and settings.warehouse == "databricks"
         else db.query(Glossary).filter(Glossary.domain == selected_domain).all()
     )
     if settings.warehouse in {"databricks", "snowflake"}:
@@ -1289,6 +1389,31 @@ def user_context(
         "rules": [],
         "synchronized_at": None,
     }
+
+
+@app.get("/context/foresight")
+def foresight_context(
+    domain: str | None = None,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Overview, entities, relationships, metrics and rules for one authorized domain (read-only).
+
+    Assembled from the metric registries, the business context definitions and the metadata snapshot
+    built at warm-up; it runs no warehouse query.
+    """
+    selected_domain, tenant_id = authorize_context_domain(db, user, domain)
+    catalog = None
+    if settings.warehouse == "databricks":
+        try:
+            catalog = (
+                databricks_healthcare_tenant_catalog(tenant_id)
+                if selected_domain == "healthcare" and tenant_id
+                else databricks_domain_catalog(selected_domain)
+            )
+        except GuardrailError:
+            catalog = None
+    return foresight.build(selected_domain, orchestrator.graph, catalog, orchestrator.graph.synchronized_at)
 
 
 @app.post("/tabpfn/diagnostics")

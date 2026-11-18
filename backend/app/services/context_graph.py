@@ -1,6 +1,7 @@
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import networkx as nx
 from sqlalchemy import inspect, text
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..domains import finance_gold_glossary
+from .banking_context import glossary_for_postgres_shape as banking_gold_glossary
 from ..warehouse import warehouse_schema_columns, warehouse_status
 from .schema_rag import SchemaRagError, SchemaRagService
 
@@ -32,6 +34,8 @@ class ContextGraphService:
         self.domain_tables: dict[str, dict[str, list[dict[str, str]]]] = {}
         self.glossary: list[dict[str, str]] = []
         self.rag = SchemaRagService()
+        # When warehouse metadata was last loaded; None until a load succeeds.
+        self.synchronized_at: str | None = None
 
     def rebuild(self, db: Session) -> None:
         self.graph.clear()
@@ -55,7 +59,12 @@ class ContextGraphService:
         ).mappings()
         self.glossary = [dict(r) for r in rows]
         if settings.warehouse == "databricks":
-            self.glossary = [g for g in self.glossary if g.get("domain") != "finance"] + finance_gold_glossary()
+            # The PostgreSQL finance and banking rows describe local demo tables, not the gold catalogs.
+            self.glossary = (
+                [g for g in self.glossary if g.get("domain") not in {"finance", "banking"}]
+                + finance_gold_glossary()
+                + banking_gold_glossary()
+            )
         if settings.warehouse in {"databricks", "snowflake"} and warehouse_status()["ready"]:
             if settings.warehouse == "databricks":
                 self.graph.clear()
@@ -63,6 +72,7 @@ class ContextGraphService:
                     self.domain_tables[domain] = domain_schema
                     self.tables.update(domain_schema)
                     self.graph.add_nodes_from(domain_schema)
+                self.synchronized_at = _now()
                 self._sync_rag(self.domain_tables)
                 return
             self.refresh_warehouse_schema()
@@ -160,6 +170,7 @@ class ContextGraphService:
             self.graph.clear()
             for table in self.tables:
                 self.graph.add_node(table)
+            self.synchronized_at = _now()
             self._sync_rag(self.domain_tables)
             return
         tables = warehouse_schema_columns()
@@ -168,6 +179,10 @@ class ContextGraphService:
         for table in tables:
             self.graph.add_node(table)
         self._sync_rag()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _load_domain_schemas() -> dict[str, dict[str, list[dict[str, str]]]]:

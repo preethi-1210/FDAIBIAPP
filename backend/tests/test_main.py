@@ -107,9 +107,15 @@ class DemoAccountVisibilityTests(unittest.TestCase):
         entries = history(database, AuthUser("bank.user", "banking", "analyst"))
 
         self.assertEqual(entries[0]["audit_id"], "AU-1234")
-        self.assertEqual(entries[0]["tables_used"], ["accounts"])
+        # Physical table names and SQL are technical detail kept for administrators.
+        self.assertEqual(entries[0]["tables_used"], [])
+        self.assertIsNone(entries[0]["sql"])
         self.assertEqual(entries[0]["row_count"], 1)
         self.assertTrue(entries[0]["guardrail_ok"])
+
+        admin_entries = history(database, AuthUser("admin", "banking", "admin"))
+        self.assertEqual(admin_entries[0]["tables_used"], ["accounts"])
+        self.assertEqual(admin_entries[0]["sql"], result.sql)
 
     def test_remote_dashboard_metrics_are_cached_per_user_and_domain(self) -> None:
         _dashboard_cache.clear()

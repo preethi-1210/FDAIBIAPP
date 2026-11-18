@@ -7,17 +7,22 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   Building2,
+  ChartCandlestick,
   CircleDollarSign,
   Clock3,
   Database,
+  HeartPulse,
+  Landmark,
   MoreHorizontal,
   RefreshCw,
   ShieldCheck,
+  ShoppingBag,
   LoaderCircle,
   Percent,
   UsersRound,
+  type LucideIcon,
 } from "lucide-react";
-import { Shell } from "@/components/Shell";
+import { DOMAIN_CHANGED_EVENT, DOMAIN_LABELS, Shell } from "@/components/Shell";
 import { BusinessContext } from "@/components/ContextArchitecture";
 import {
   ActivityBarChart,
@@ -29,7 +34,7 @@ import {
 } from "@/components/Charts";
 import { RiskMatrixHeatMap } from "@/components/RiskMatrixHeatMap";
 import { WorkspaceSidebar, type WorkspaceView } from "@/components/WorkspaceSidebar";
-import { api } from "@/lib/api";
+import { api, switchDomain } from "@/lib/api";
 
 type Series = { label: string; value: number | null; events?: number | null };
 type CategoryTrend = { label: string; category: string; value: number };
@@ -87,6 +92,19 @@ type DateRange = 1 | 3 | 6 | 12;
 const AUTO_REFRESH_MS = 120_000;
 type MixChartType = "donut" | "bar";
 
+const DOMAIN_ICONS: Record<string, LucideIcon> = {
+  banking: Landmark,
+  finance: ChartCandlestick,
+  insurance: ShieldCheck,
+  retail: ShoppingBag,
+  healthcare: HeartPulse,
+};
+
+function DomainIcon({ domain }: { domain?: string }) {
+  const Icon = (domain && DOMAIN_ICONS[domain]) || Building2;
+  return <Icon size={20} />;
+}
+
 export default function DashboardPage() {
   const [data, setData] = useState<Dash | null>(null);
   const [businessContext, setBusinessContext] = useState<BusinessContext | null>(null);
@@ -126,6 +144,28 @@ export default function DashboardPage() {
     data && (data.volume || data.events || data.by_month.length || data.by_region.length || data.live.length),
   );
   const latestMonth = trendMonths.length ? trendMonths[trendMonths.length - 1].label : null;
+  // Role and permitted domains come from the API; the backend re-checks every switch.
+  const isAdmin = businessContext?.user.role === "admin";
+  const activeDomain = data?.domain || businessContext?.user.domain || "";
+  const [switchingDomain, setSwitchingDomain] = useState(false);
+  const [domainError, setDomainError] = useState("");
+
+  async function changeDomain(next: string) {
+    if (!next || next === activeDomain) return;
+    setSwitchingDomain(true);
+    setDomainError("");
+    try {
+      // POST /auth/switch-domain: refuses domains the user may not see and Healthcare without a tenant.
+      await switchDomain(next);
+      setData(null);
+      await Promise.all([load(), loadBusinessContext()]);
+      window.dispatchEvent(new Event(DOMAIN_CHANGED_EVENT));
+    } catch (err) {
+      setDomainError(err instanceof Error ? err.message : "Could not switch domain.");
+    } finally {
+      setSwitchingDomain(false);
+    }
+  }
 
   async function load(force = false) {
     setLoading(true);
@@ -171,23 +211,31 @@ export default function DashboardPage() {
     <Shell>
       <div className="dashboard-page workspace-dark">
         <div className="dashboard-heading">
-          <div>
+          {/* The active domain comes from the API (the signed-in session), so a domain switch updates it. */}
+          <div className="dashboard-heading__domain">
+            <span className="dashboard-heading__domain-icon" aria-hidden="true">
+              <DomainIcon domain={data?.domain || businessContext?.user.domain} />
+            </span>
+            <span className="dashboard-heading__divider" aria-hidden="true" />
             <h1>{data?.domain_label || businessContext?.user.domain_label || "Dashboard"}</h1>
-            <p className="dashboard-subtitle">
-              {data
-                ? "Business performance across the authorized source"
-                : "Waiting for the configured live warehouse."}
-            </p>
           </div>
           <div className="dashboard-toolbar">
-            <label className="dashboard-toolbar__field">
-              <span>Domain</span>
-              <select value={data?.domain || businessContext?.user.domain || ""} disabled aria-label="Authorized domain">
-                <option value={data?.domain || businessContext?.user.domain || ""}>
-                  {data?.domain_label || businessContext?.user.domain_label || "Loading"}
-                </option>
-              </select>
-            </label>
+            {isAdmin && businessContext && (
+              <label className="dashboard-toolbar__field">
+                <span>Domain</span>
+                <select
+                  value={activeDomain}
+                  onChange={(event) => void changeDomain(event.target.value)}
+                  disabled={switchingDomain || loading}
+                  aria-label="Dashboard domain"
+                >
+                  {businessContext.user.permitted_domains.map((item) => (
+                    <option key={item} value={item}>{DOMAIN_LABELS[item] ?? item}</option>
+                  ))}
+                </select>
+                {domainError ? <small role="alert" className="access-error-text">{domainError}</small> : null}
+              </label>
+            )}
             <label className="dashboard-toolbar__field">
               <span>Date range</span>
               <select

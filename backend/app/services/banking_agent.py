@@ -29,6 +29,8 @@ from .banking_query import (
     Period,
     PlanError,
     QueryPlan,
+    _extract_filters,
+    _leftover_terms,
     clarification_for_terms,
     compile_plan,
     parse_question,
@@ -36,6 +38,7 @@ from .banking_query import (
     validate_plan,
 )
 from .banking_registry import BANKING, DomainRegistry, Measure, Metric, Source, active_registry, metric_by_id, use_registry
+from . import banking_context
 from .forecasting import InsufficientHistoryError, assess_history, forecast_series
 from .guardrail import GuardrailError
 from .sql_policy import USER_MESSAGES, classify_sql_error, enforce_select_policy
@@ -149,8 +152,31 @@ class BankingAgent:
     ) -> AgentResult | None:
         """The answer, or None when this is not a question the banking workflow handles."""
         with use_registry(self._registry):
+            resolution = None
+            if self._registry is BANKING:
+                # Business terms are resolved before planning, so no planner, rule-based or model,
+                # can map a word that has no approved meaning or no data.
+                resolution = banking_context.resolve_terminology(question)
+                record_step(
+                    "context", f"banking business context {banking_context.CONTEXT_VERSION}",
+                    ok=not (resolution.refusal or resolution.clarification),
+                    detail=_resolution_detail(resolution),
+                )
+                if resolution.refusal or resolution.clarification:
+                    status = "insufficient_data" if resolution.refusal else "needs_clarification"
+                    result = AgentResult(resolution.refusal or resolution.clarification, status, evidence=_registry_evidence())
+                    result.evidence["business_context"] = _context_evidence(resolution, None)
+                    return result
+                question = resolution.question
             state = self._workflow.invoke({"question": question, "user": user, "previous": previous, "provider": provider, "approved": approved})
-        return state.get("result")
+            result = state.get("result")
+            if result is not None and resolution is not None:
+                result.evidence["business_context"] = _context_evidence(resolution, result.plan)
+                if result.plan is not None:
+                    applied = banking_context.rules_for(result.plan.metric_id)
+                    if applied:
+                        record_step("business_rules", "banking business rules", detail=", ".join(f"{rule.id} ({rule.status})" for rule in applied)[:200])
+        return result
 
     @staticmethod
     def _next_step(state: AgentState) -> str:
@@ -216,6 +242,17 @@ class BankingAgent:
                 return None, clarification_for_terms(terms, plan.metric if metric_by_id(plan.metric_id) else hint)
             registry = active_registry()
             return None, f"I could not match this question to approved {registry.label} data. Approved {registry.label} measures are: {registry.supported_summary()}. Which one do you mean?"
+        if not terms:
+            # Nothing was left for the model to explain, so anything it adds was not asked for.
+            invented = _ungrounded(plan, question, parsed)
+            if invented:
+                record_step("planner", "plan grounding", ok=False, detail="not in the question: " + ", ".join(invented)[:180])
+                registry = active_registry()
+                return None, (
+                    f"I could not match this question to approved {registry.label} data without adding {', '.join(invented)}, "
+                    f"which the question does not ask for. Approved {registry.label} measures are: {registry.supported_summary()}. "
+                    "Which one do you mean?"
+                )
         if terms:
             # Rules found words they could not place. Only a filter value the model added can account
             # for them; a breakdown or a grain answers a different question and drops the restriction.
@@ -456,6 +493,34 @@ class BankingAgent:
         return AgentResult(_with_basis(answer, plan, coverage), "complete", plan=plan, sql=sql, table=rows, evidence=evidence)
 
 
+def _ungrounded(plan: QueryPlan, question: str, parsed: ParseResult) -> list[str]:
+    """Parts of a model's plan that nothing in the question supports: breakdowns, filters, grain, ranking."""
+    invented = []
+    for dimension_id in plan.dimensions:
+        dimension = plan.metric.source.dimension(dimension_id)
+        if dimension is not None and not any(re.search(rf"\b{alias}\b", question, re.IGNORECASE) for alias in dimension.aliases):
+            invented.append(f"a breakdown by {dimension.label}")
+    named = parsed.detected.get("filters") or {}
+    spoken = _extract_filters(question, plan.metric)[0]
+    # A paraphrase ("automotive energy" for FUEL) leaves words the rules could not explain; with none
+    # left, a filter the model added is not in the question.
+    unexplained = _leftover_terms(question, plan.metric)
+    for dimension_id, values in ({} if unexplained else plan.filters).items():
+        for value in values:
+            if value not in (named.get(dimension_id) or []) and value not in (spoken.get(dimension_id) or []):
+                invented.append(f"a filter on {value}")
+    if plan.grain and not (_GRAIN_WORDS.search(question) or parsed.detected.get("periods")):
+        invented.append(f"a {_GRAIN_LABELS.get(plan.grain, plan.grain)} grain")
+    if plan.top_n and not _TOP_WORDS.search(question):
+        invented.append(f"a top {plan.top_n} ranking")
+    return invented
+
+
+_GRAIN_WORDS = re.compile(r"\b(?:daily|weekly|monthly|day|week|month|trend\w*|over\s+time|history|by\s+(?:day|week|month))\b", re.IGNORECASE)
+_GRAIN_LABELS = {"day": "daily", "week": "weekly", "month": "monthly"}
+_TOP_WORDS = re.compile(r"\b(?:top|highest|largest|biggest|most|lowest|smallest|least|bottom|rank\w*)\b", re.IGNORECASE)
+
+
 def _today() -> date:
     return date.today()
 
@@ -486,6 +551,9 @@ def _evidence(plan: QueryPlan, coverage: dict[str, Any], rows: list[dict[str, An
     evidence = {
         "kind": "metric",
         "metric": metric.id,
+        # Display names only: the definition, filters and formula above are unchanged.
+        "metric_label": metric.label,
+        "filter_labels": {key: (metric.source.dimension(key).label if metric.source.dimension(key) else key) for key in plan.filters},
         "metric_version": metric.version,
         "registry_version": active_registry().version,
         "definition": metric.definition,
@@ -514,7 +582,41 @@ def _with_basis(answer: str, plan: QueryPlan, coverage: dict[str, Any]) -> str:
     basis = f"Source: {active_registry().catalog_schema}.{metric.source.from_clause.split()[0]}. Reporting period: {_period_label(plan.period)}; data available {_coverage_text(coverage)}. Definition: {metric.definition}"
     if plan.interpreted_by == "llm":
         basis = f"Read your question as: {plan.describe()}. {basis}"
+    if active_registry() is BANKING:
+        # Pending business rules and known data limitations are stated in the answer itself.
+        disclosures = banking_context.rule_disclosures(metric.id, plan.filters)
+        if disclosures:
+            basis += "\n\nBusiness rule: " + " ".join(disclosures)
+        if metric.data_quality:
+            basis += "\n\nLimitations: " + " ".join(metric.data_quality)
     return f"{answer}\n\n{basis}"
+
+
+def _resolution_detail(resolution: "banking_context.Resolution") -> str:
+    parts = []
+    if resolution.terms:
+        parts.append("terms: " + ", ".join(resolution.terms))
+    if resolution.rewrites:
+        parts.append("read as: " + "; ".join(f"{old!r} -> {new!r}" for old, new in resolution.rewrites))
+    if resolution.refusal:
+        parts.append("not available in banking.gold")
+    elif resolution.clarification:
+        parts.append("no approved meaning; clarification asked")
+    return "; ".join(parts)[:200] or "no business terms needed"
+
+
+def _context_evidence(resolution: "banking_context.Resolution", plan: QueryPlan | None) -> dict[str, Any]:
+    rules = list(resolution.rules)
+    if plan is not None:
+        rules += [rule.id for rule in banking_context.rules_for(plan.metric_id) if rule.id not in rules]
+    statuses = {rule.id: rule.status for rule in banking_context.RULES}
+    return {
+        "context_version": banking_context.CONTEXT_VERSION,
+        "terms": list(resolution.terms),
+        "read_as": [{"from": old, "to": new} for old, new in resolution.rewrites],
+        "rules": [{"id": rule_id, "status": statuses.get(rule_id)} for rule_id in rules],
+        "source": banking_context.SOURCES["analytical"]["location"],
+    }
 
 
 def _outside_coverage(period: Period | None, coverage: dict[str, Any]) -> str | None:

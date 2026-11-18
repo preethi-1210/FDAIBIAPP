@@ -78,6 +78,27 @@ def _has_healthcare_tenant(db: Session, username: str) -> bool:
     )
 
 
+def authorize_context_domain(db: Session, user: AuthUser, domain: str | None) -> tuple[str, str | None]:
+    """The domain a user may view context for, and its Healthcare tenant; raises 403 otherwise.
+
+    Shared by GET /context and GET /context/foresight so both apply the same checks.
+    """
+    selected = domain or user.domain
+    if selected not in domains_for(db, user):
+        raise HTTPException(status_code=403, detail="This user cannot view context for that business domain.")
+    tenant_id = user.tenant_id if selected == user.domain else None
+    if selected == "healthcare" and user.domain != "healthcare":
+        assignment = (
+            db.query(UserDomainTenant)
+            .filter(UserDomainTenant.username == user.username, UserDomainTenant.domain == "healthcare")
+            .one_or_none()
+        )
+        if assignment is None:
+            raise HTTPException(status_code=403, detail="This user has no administrator-provisioned Healthcare tenant.")
+        tenant_id = assignment.tenant_id
+    return selected, tenant_id
+
+
 def domains_for(db: Session, user: AuthUser) -> list[str]:
     """Authorized domains for an authenticated user, read from the database."""
     if user.role == "admin":

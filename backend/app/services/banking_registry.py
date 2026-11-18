@@ -114,7 +114,7 @@ TRANSACTIONS = Source(
     (
         Dimension("txn_type", "transaction type", "t.txn_type", (r"(?:transaction|txn)\s+types?", r"types?(?:\s+of\s+transactions?)?"), ("DEBIT", "CREDIT", "TRANSFER"), (("debits", "DEBIT"), ("credits", "CREDIT"), ("transfers", "TRANSFER"))),
         Dimension("channel", "channel", "t.channel", (r"channels?",), ("ATM", "NETBANKING", "IMPS", "POS", "UPI", "NEFT"), (("net banking", "NETBANKING"), ("internet banking", "NETBANKING"))),
-        Dimension("merchant_category", "merchant category", "t.merchant_category", (r"merchant\s+categor(?:y|ies)", r"merchants?", r"categor(?:y|ies)"), ("CASH", "FOOD", "ELECTRONICS", "TRAVEL", "UTILITIES", "GROCERY", "SHOPPING", "FUEL", "JEWELLERY"), (("jewelry", "JEWELLERY"), ("groceries", "GROCERY"), ("utility", "UTILITIES"), ("petrol", "FUEL"), ("diesel", "FUEL"), ("flights", "TRAVEL"), ("restaurants", "FOOD"))),
+        Dimension("merchant_category", "merchant category", "t.merchant_category", (r"merchant\s+categor(?:y|ies)", r"spend\s+categor(?:y|ies)", r"categor(?:y|ies)"), ("CASH", "FOOD", "ELECTRONICS", "TRAVEL", "UTILITIES", "GROCERY", "SHOPPING", "FUEL", "JEWELLERY"), (("jewelry", "JEWELLERY"), ("groceries", "GROCERY"), ("utility", "UTILITIES"), ("petrol", "FUEL"), ("diesel", "FUEL"), ("flights", "TRAVEL"), ("restaurants", "FOOD"))),
         Dimension("status", "transaction status", "t.status", (r"(?:transaction\s+)?status(?:es)?",), ("SUCCESS", "FAILED", "PENDING"), (("successful", "SUCCESS"), ("succeeded", "SUCCESS"), ("completed", "SUCCESS"), ("failures", "FAILED"), ("failure", "FAILED"), ("fail", "FAILED"))),
         Dimension("city", "transaction city", "t.city", (r"cit(?:y|ies)", r"locations?"), _CITIES, (("bangalore", "Bengaluru"),)),
         _REGION,

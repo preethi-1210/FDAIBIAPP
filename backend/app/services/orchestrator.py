@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from ..auth import AuthUser
 from ..config import settings
 from ..domains import DOMAIN_LABELS
-from ..llm import complete_text, record_step, trace_steps, usage_gate, usage_refusal
-from ..governance import build_lineage, chart_spec, extract_tables, guardrail_report, model_gov, source_tables
+from ..llm import complete_text, record_step, report_progress, trace_steps, usage_gate, usage_refusal
+from ..governance import build_lineage, chart_spec, execution_summary, extract_tables, guardrail_report, model_gov, source_tables
 from ..models import Claim, ConversationQueryState, Customer, HitlReview, LiveEvent, Order, OrderItem, Product, QueryHistory
 from ..schemas import PredictionPayload, QueryResponse, UncertaintyPayload
 from ..sensitive_data import (
@@ -41,6 +41,7 @@ from .knowledge import format_knowledge_answer
 from .metrics import format_metric_answer
 from .observability import current_request_id, observe_request
 from . import subscriptions
+from .business_scope import is_out_of_scope
 from .planner import is_reference_question, route_question
 from .banking_agent import AgentResult, BankingAgent
 from .banking_query import QueryPlan
@@ -981,6 +982,8 @@ class Orchestrator:
         with trace_steps() as steps, request_deadline(settings.ask_deadline_seconds), usage_gate(gate.refusal if gate else None):
             try:
                 subscriptions.require_no_refusal(subscriptions.provider_refusal(db, gate, llm_override))
+                # Authenticated, within the plan allowance and accepted by the analytics service.
+                report_progress({"type": "phase", "phase": "connected"})
                 response = self._run(
                     db,
                     question,
@@ -1048,6 +1051,31 @@ class Orchestrator:
                 status_code=422,
                 detail=f"{named_domain.title()} data is outside the authorized {user.domain} source. "
                 "No query was run. If you have access, switch to that domain and ask again.",
+            )
+        if is_out_of_scope(question):
+            # Before any planner, metric tool or SQL: nothing about the business is looked up or invented.
+            record_step("input_policy", "business-scope check", detail="Not a business question; no data queried")
+            label = DOMAIN_LABELS.get(user.domain, user.domain)
+            return self._respond(
+                db,
+                user=user,
+                question=question,
+                plan={"intent": "out_of_scope", "route": "none", "subtasks": [], "is_prediction": False},
+                schema_ctx={},
+                steps=steps,
+                audit_id=f"AU-{uuid4().hex[:12].upper()}",
+                persist_history=persist_history,
+                conversation_id=conversation_id,
+                answer=(
+                    "This is not a business-oriented question, so no data was queried. I can help with business "
+                    f"insights, analytics and information for your permitted {label} domain."
+                ),
+                status="out_of_scope",
+                sql=None,
+                table=[],
+                guardrail_ok=True,
+                error=None,
+                evidence={"kind": "none", "sources": [], "row_count": 0},
             )
         # Refusals and registry answers need no schema metadata, so they hold during an outage.
         require_sensitive_request_access(question, user.role)
@@ -1431,7 +1459,9 @@ class Orchestrator:
                 )
             )
             hitl = {"status": "pending", "audit_id": audit_id, "reason": "guardrail"}
-        governance = model_gov(prediction, llm_provider)
+        # Read from what this request actually ran, never from which providers are configured.
+        execution = execution_summary(steps, sql, evidence)
+        governance = model_gov(prediction, execution)
         governance["approval"] = (
             "Administrator approval required before business users receive predictions"
             if settings.hitl_prediction_review
@@ -1460,6 +1490,7 @@ class Orchestrator:
                 schema_used,
                 guardrail_ok,
                 counts,
+                sql_origin=execution["sql_origin"],
             ) if sql else None,
             guardrails=guardrail_report(sql, guardrail_ok, error) if sql else None,
             hitl=hitl or {"status": "not_required", "audit_id": audit_id},
@@ -1767,6 +1798,7 @@ class Orchestrator:
         evidence = {
             "kind": "metric",
             "metric": data["metric"],
+            "metric_label": data["label"],
             "formula": data["formula"],
             "filters": data["filters"],
             "period": data["period"],

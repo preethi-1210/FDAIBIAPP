@@ -7,12 +7,12 @@ import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer
 import {
   Activity,
   ArrowLeft,
-  ArrowRight,
   BarChart3,
   Check,
   ChevronDown,
   CircleHelp,
   Clock3,
+  Info,
   History,
   LoaderCircle,
   Menu,
@@ -23,12 +23,21 @@ import {
   Send,
   Sparkles,
   SquarePen,
+  Square,
   Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
 import { ResultWorkspace } from "@/components/ResultWorkspace";
-import { API_URL, ApiError, api } from "@/lib/api";
+import { DOMAIN_LABELS } from "@/components/Shell";
+import { ExecutionProgress } from "@/components/ask/ExecutionProgress";
+import { OutOfScopeCard } from "@/components/ask/OutOfScopeCard";
+import { AnswerCard, UnsupportedNotice, type InsightResult } from "@/components/ask/AnswerCards";
+import { API_URL, ApiError, api, switchDomain } from "@/lib/api";
+import { AskWelcome } from "@/components/ask/AskWelcome";
+import { ComposerDomainPicker, ComposerPlusMenu } from "@/components/ask/ComposerMenus";
+import { askStream } from "@/lib/askStream";
+import { applyStreamEvent, failJourney, startJourney, type Journey } from "@/lib/askJourney";
 import { PlanMenuLink, PlanNotices, PlanUsageCard, UpgradePrompt, usePlanUsage } from "@/components/PlanUsage";
 import type { PlanUsage } from "@/lib/subscription";
 import {
@@ -37,7 +46,13 @@ import {
   SENSITIVE_DEMO_PROMPTS,
 } from "@/lib/sensitive-data";
 
-type Result = Parameters<typeof ResultWorkspace>[0]["result"] & { conversation_id?: string | null; usage?: PlanUsage | null };
+type Result = Parameters<typeof ResultWorkspace>[0]["result"] & {
+  conversation_id?: string | null;
+  usage?: PlanUsage | null;
+  domain?: string | null;
+  evidence?: InsightResult["evidence"];
+  presentation?: InsightResult["presentation"];
+};
 type HistoryItem = {
   id: number;
   question: string;
@@ -54,6 +69,14 @@ type ConversationTurn = {
   created_at: string;
   result?: Result;
   sensitiveWarning?: boolean;
+  // How long the analysis took, when it ran in this session (history rows do not record it).
+  elapsedMs?: number;
+};
+/** A question still running, or one that failed and can be retried. Not yet part of history. */
+type PendingQuestion = {
+  question: string;
+  conversation: Conversation | null;
+  journey: Journey;
 };
 type Conversation = {
   id: string;
@@ -65,9 +88,9 @@ type Conversation = {
   result?: Result;
   turns?: ConversationTurn[];
   sensitiveWarning?: boolean;
+  elapsedMs?: number;
 };
 type ConversationMeta = { title?: string; pinned?: boolean };
-type Provider = "auto" | "google" | "openai" | "grok" | "anthropic" | "ollama";
 
 // The API reports how each answer was reached; only "complete" is a successful analysis.
 const STATUS_LABELS: Record<string, string> = {
@@ -77,32 +100,9 @@ const STATUS_LABELS: Record<string, string> = {
   insufficient_history: "Insufficient history",
   needs_clarification: "Clarification needed",
   awaiting_review: "Awaiting administrator review",
+  out_of_scope: "Not a business question",
   error: "Could not complete",
 };
-
-const SUGGESTIONS_BY_DOMAIN = {
-  banking: [
-    { icon: Activity, title: "Transaction activity", question: "Show transaction volume for last week", detail: "Review recent banking transaction totals" },
-    { icon: BarChart3, title: "Account balances", question: "Show the latest account balance totals", detail: "See the most recent account balance summary" },
-  ],
-  finance: [
-    { icon: Activity, title: "Monthly balances", question: "Show account balances by month", detail: "Review the monthly account balance trend" },
-    { icon: BarChart3, title: "Latest balances", question: "Show the latest account balance totals", detail: "See the most recent account balance summary" },
-  ],
-  insurance: [
-    { icon: Activity, title: "Policy premiums", question: "Show total premium by policy status", detail: "Compare premium totals across policy statuses" },
-    { icon: BarChart3, title: "Claims activity", question: "How many claims were recorded last month?", detail: "Review recent claims volume" },
-  ],
-  retail: [
-    { icon: Activity, title: "Weekly orders", question: "How many orders did we get last week?", detail: "Count orders from the previous calendar week" },
-    { icon: BarChart3, title: "Revenue by region", question: "What is revenue by region?", detail: "Compare order revenue across regions" },
-    { icon: MessageSquareText, title: "Sales trends", question: "Show monthly retail sales trend", detail: "Review monthly order value and volume" },
-  ],
-  healthcare: [
-    { icon: Activity, title: "Common diagnoses", question: "What are the most common diagnosis categories?", detail: "Review aggregate diagnosis counts" },
-    { icon: BarChart3, title: "Encounter activity", question: "How many encounters were recorded?", detail: "Review aggregate encounter volume" },
-  ],
-} satisfies Record<string, { icon: typeof Activity; title: string; question: string; detail: string }[]>;
 
 const messageVariants: Variants = {
   hidden: { opacity: 0, y: 18 },
@@ -157,8 +157,9 @@ export default function ChatPage() {
   const router = useRouter();
   const reduceMotion = useReducedMotion();
   const [question, setQuestion] = useState("");
-  const [provider, setProvider] = useState<Provider>("auto");
   const [domain, setDomain] = useState("workspace");
+  // Domains this user may work in, as the API reports them; never from browser storage.
+  const [domains, setDomains] = useState<string[]>([]);
   const [username, setUsername] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -172,13 +173,17 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [restoringId, setRestoringId] = useState<string | null>(null);
-  const [inputFocused, setInputFocused] = useState(false);
+  const [pending, setPending] = useState<PendingQuestion | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const latestTurnRef = useRef<HTMLDivElement>(null);
 
+  const domainLabel = DOMAIN_LABELS[domain] ?? domain;
   const activeConversation = conversations.find((item) => item.id === activeId) ?? null;
-  const suggestions = SUGGESTIONS_BY_DOMAIN[domain as keyof typeof SUGGESTIONS_BY_DOMAIN] ?? [];
   const isConversationActive = activeConversation !== null;
+  // A running question belongs to the conversation it was asked in.
+  const showPending = pending !== null && (pending.conversation?.id ?? null) === (activeConversation?.id ?? null);
   const pinnedItems = useMemo(() => conversations.filter((item) => meta[item.id]?.pinned), [conversations, meta]);
   const recentItems = useMemo(() => conversations.filter((item) => !meta[item.id]?.pinned), [conversations, meta]);
 
@@ -205,11 +210,12 @@ export default function ChatPage() {
     }
 
     let cancelled = false;
-    api<{ username: string; domain: string }>("/me")
+    api<{ username: string; domain: string; authorized_domains?: string[] }>("/me")
       .then((me) => {
         if (cancelled) return;
         setUsername(me.username);
         setDomain(me.domain);
+        setDomains(me.authorized_domains ?? [me.domain]);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not verify your access role.");
@@ -241,11 +247,18 @@ export default function ChatPage() {
   }, [meta]);
 
   useEffect(() => {
-    if (!activeId || !isConversationActive) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "end" });
-  }, [activeId, conversations, isConversationActive, reduceMotion]);
+    if ((!activeId || !isConversationActive) && !pending) return;
+    const behavior = reduceMotion ? "auto" : "smooth";
+    // While a question runs, follow its progress; once answered, show the answer from its top.
+    if (pending) messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+    else latestTurnRef.current?.scrollIntoView({ behavior, block: "start" });
+  }, [activeId, conversations, isConversationActive, reduceMotion, pending]);
+
+  // Leaving the page cancels a request still streaming.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const startNewAnalysis = useCallback(() => {
+    if (!abortRef.current) setPending(null);
     setActiveId(null);
     setQuestion("");
     setError("");
@@ -254,6 +267,7 @@ export default function ChatPage() {
   }, []);
 
   async function selectConversation(conversation: Conversation) {
+    if (!abortRef.current) setPending(null);
     setActiveId(conversation.id);
     setQuestion("");
     setError("");
@@ -312,36 +326,70 @@ export default function ChatPage() {
     textareaRef.current?.focus();
   }
 
-  async function runQuestion(submitted: string) {
+  async function runQuestion(submitted: string, conversation: Conversation | null = activeConversation) {
     if (!submitted || busy) return;
-    const selectedConversation = activeConversation;
+    const selectedConversation = conversation;
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    abortRef.current = controller;
     setBusy(true);
     setError("");
     setPlanLimit("");
+    setQuestion("");
+    setSidebarOpen(false);
+    setPending({ question: submitted, conversation: selectedConversation, journey: startJourney() });
     try {
-      const result = await api<Result>("/query", {
-        method: "POST",
-        body: JSON.stringify({
+      // The progress shown is the server's own record of each stage as it happens.
+      const result = await askStream<Result>(
+        {
           question: submitted,
-          llm_provider: provider === "auto" ? null : provider,
           conversation_id: selectedConversation?.conversationId ?? null,
-        }),
-      });
-      applyResult(selectedConversation, submitted, result);
+        },
+        (event) => setPending((current) => current && { ...current, journey: applyStreamEvent(current.journey, event, domainLabel) }),
+        controller.signal,
+      );
+      setPending(null);
+      applyResult(selectedConversation, submitted, result, Math.round(performance.now() - startedAt));
       planUsage.update(result.usage);
       setPlanLimit(result.usage?.limited_by_plan ?? "");
-      setQuestion("");
-      setSidebarOpen(false);
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 402) {
+      if (controller.signal.aborted) {
+        setPending((current) => current && {
+          ...current,
+          journey: failJourney(
+            current.journey,
+            "You cancelled this request. If the analysis had already started on the server, it may still finish and appear in Recent history.",
+          ),
+        });
+      } else if (cause instanceof ApiError && cause.status === 402) {
+        setPending(null);
         setPlanLimit(cause.message);
         void planUsage.refresh();
       } else {
-        setError(cause instanceof Error ? cause.message : "The analysis could not be completed.");
+        const message = cause instanceof Error ? cause.message : "The analysis could not be completed.";
+        // A refusal (for example another domain's data) will not change on retry; an outage may.
+        const retryable = !(cause instanceof ApiError) || cause.status === 0 || cause.status >= 500 || cause.status === 429;
+        setPending((current) => current && { ...current, journey: failJourney(current.journey, message, retryable) });
       }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setBusy(false);
     }
+  }
+
+  function cancelQuestion() {
+    abortRef.current?.abort();
+  }
+
+  function retryPending() {
+    if (!pending || busy) return;
+    void runQuestion(pending.question, pending.conversation);
+  }
+
+  /** Asks an example question from the out-of-scope card in the same conversation. */
+  function askExample(example: string) {
+    if (busy) return;
+    void runQuestion(example, activeConversation);
   }
 
   /** Continue a prediction an administrator approved, in its original conversation. */
@@ -360,13 +408,14 @@ export default function ChatPage() {
     }
   }
 
-  function applyResult(selectedConversation: Conversation | null, submitted: string, result: Result) {
+  function applyResult(selectedConversation: Conversation | null, submitted: string, result: Result, elapsedMs?: number) {
     const turn: ConversationTurn = {
       question: submitted,
       answer: result.answer,
       sql: result.sql,
       created_at: new Date().toISOString(),
       result,
+      elapsedMs,
     };
     const conversationId = result.conversation_id || selectedConversation?.conversationId;
     if (selectedConversation?.conversationId && conversationId === selectedConversation.conversationId) {
@@ -430,8 +479,20 @@ export default function ChatPage() {
     await runQuestion(submitted);
   }
 
+  async function changeDomain(next: string) {
+    if (busy) return;
+    try {
+      await switchDomain(next);
+      // A full reload drops conversations and history that belong to the previous domain.
+      window.location.assign("/chat");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not switch domain.");
+    }
+  }
+
   function handleInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // Ctrl + Enter (Cmd + Enter on a Mac) sends; Enter alone also sends, Shift + Enter adds a line.
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
       event.preventDefault();
       void submitQuestion();
     }
@@ -457,19 +518,7 @@ export default function ChatPage() {
             </summary>
             <div className="app-account-menu__panel">
               <span>{username || "Signed-in user"}</span>
-              <small>Authorized domain: {domain}</small>
-              <label className="chat-provider chat-provider--menu">
-                <span>Language model provider</span>
-                <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-                  <option value="auto">Auto</option>
-                  <option value="google">Google Gemini</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="grok">Grok</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="ollama">Ollama</option>
-                </select>
-                <ChevronDown size={13} />
-              </label>
+              <small>Authorized domain: {domainLabel}</small>
               <PlanMenuLink usage={planUsage.usage} />
               <button type="button" onClick={signOut}>Sign out</button>
             </div>
@@ -566,60 +615,21 @@ export default function ChatPage() {
       </aside>
 
       <section className="chat-main">
-        <div className={`chat-scroll-area${isConversationActive ? " chat-scroll-area--conversation" : ""}${busy ? " chat-scroll-area--busy" : ""}`}>
-          {!isConversationActive ? (
-            <motion.div className="chat-welcome" initial="hidden" animate="visible" variants={{ visible: { transition: { staggerChildren: 0.07 } } }}>
-              <motion.div variants={messageVariants} className="chat-welcome__icon"><Sparkles size={23} /></motion.div>
-              <motion.p variants={messageVariants} className="chat-welcome__eyebrow">FD AI/BI ANALYTICS</motion.p>
-              <motion.h1 variants={messageVariants}>Natural Language to Insights</motion.h1>
-              <motion.p variants={messageVariants} className="chat-welcome__description">
-                Ask a business question. Explore trusted data, discover patterns, and get an answer with the analysis behind it.
-              </motion.p>
-              <motion.div variants={messageVariants} className="chat-suggestions" aria-label="Suggested business questions">
-                {suggestions.map(({ icon: Icon, title, question: prompt, detail }) => (
-                  <motion.button
-                    key={prompt}
-                    type="button"
-                    className="chat-suggestion"
-                    onClick={() => setSuggestion(prompt)}
-                    whileHover={reduceMotion ? undefined : { y: -2 }}
-                    whileTap={reduceMotion ? undefined : { scale: 0.985 }}
-                  >
-                    <span className="chat-suggestion__icon"><Icon size={16} /></span>
-                    <span className="chat-suggestion__copy"><b>{title}</b><small>{detail}</small></span>
-                    <ArrowRight size={14} className="chat-suggestion__arrow" />
-                  </motion.button>
-                ))}
-              </motion.div>
-              <motion.section
-                variants={messageVariants}
-                className="chat-sensitive-demo"
-                aria-label={`${domain} sensitive data demo prompts`}
-              >
-                <div className="chat-sensitive-demo__heading">
-                  <TriangleAlert size={14} />
-                  <span>Sensitive-data demo · {domain}</span>
-                </div>
-                <div className="chat-sensitive-demo__prompts">
-                  {(SENSITIVE_DEMO_PROMPTS[domain] ?? SENSITIVE_DEMO_PROMPTS.retail).map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      className="chat-sensitive-demo__prompt"
-                      onClick={() => showSensitiveNotice(prompt)}
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              </motion.section>
-            </motion.div>
+        <div className={`chat-scroll-area${isConversationActive || showPending ? " chat-scroll-area--conversation" : ""}`}>
+          {!isConversationActive && !showPending ? (
+            <AskWelcome
+              domain={domain}
+              onPrefill={setSuggestion}
+              onAsk={(prompt) => void runQuestion(prompt, null)}
+              disabled={busy}
+            />
           ) : (
             <div className="chat-thread">
+              {activeConversation ? (
               <AnimatePresence mode="popLayout">
                 <motion.article key={activeConversation.id} className="chat-exchange" variants={messageVariants} initial="hidden" animate="visible" exit={{ opacity: 0, y: -8 }} layout>
-                  {(activeConversation.turns?.length ? activeConversation.turns : [activeConversation]).map((turn, index) => (
-                    <div key={`${activeConversation.id}-${index}`}>
+                  {(activeConversation.turns?.length ? activeConversation.turns : [activeConversation]).map((turn, index, turns) => (
+                    <div key={`${activeConversation.id}-${index}`} ref={index === turns.length - 1 ? latestTurnRef : undefined} className="chat-turn">
                       <div className="chat-user-message">
                         <div className="chat-message-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
                         <div><span className="chat-message-label">You</span><p>{turn.question}</p></div>
@@ -635,7 +645,8 @@ export default function ChatPage() {
                               ? <small className="chat-sensitive-warning__label">Protected information</small>
                               : (
                                 <small className={`chat-status chat-status--${turn.result?.status ?? "complete"}`}>
-                                  {(turn.result?.status ?? "complete") === "complete" ? <Check size={12} /> : <TriangleAlert size={12} />}{" "}
+                                  {(turn.result?.status ?? "complete") === "complete" ? <Check size={12} />
+                                    : turn.result?.status === "out_of_scope" ? <CircleHelp size={12} /> : <TriangleAlert size={12} />}{" "}
                                   {STATUS_LABELS[turn.result?.status ?? "complete"] ?? "Analysis complete"}
                                 </small>
                               )}
@@ -645,6 +656,19 @@ export default function ChatPage() {
                               <TriangleAlert size={16} aria-hidden="true" />
                               <span>{turn.answer}</span>
                             </p>
+                          ) : turn.result?.status === "out_of_scope" ? (
+                            <OutOfScopeCard
+                              domain={turn.result.domain ?? domain}
+                              domainLabel={DOMAIN_LABELS[turn.result.domain ?? domain] ?? domainLabel}
+                              onAsk={askExample}
+                              disabled={busy}
+                            />
+                          ) : turn.result?.status === "insufficient_data" && ["registry", "metric"].includes(turn.result.evidence?.kind ?? "") ? (
+                            <UnsupportedNotice answer={turn.answer} domainLabel={DOMAIN_LABELS[turn.result.domain ?? domain] ?? domainLabel} />
+                          ) : turn.result?.presentation
+                            && ["complete", "no_data", "insufficient_history"].includes(turn.result.status ?? "complete")
+                            && ["metric", "warehouse", "prediction"].includes(turn.result.evidence?.kind ?? "") ? (
+                            <AnswerCard result={turn.result} elapsedMs={turn.elapsedMs} />
                           ) : (
                             <p className={`chat-answer-text${turn.result?.status && turn.result.status !== "complete" ? ` chat-answer-text--${turn.result.status}` : ""}`}>
                               {turn.answer}
@@ -662,7 +686,7 @@ export default function ChatPage() {
                           ) : null}
                           {!turn.sensitiveWarning && restoringId === activeConversation.id ? (
                             <div className="chat-sidebar-empty"><LoaderCircle size={14} className="chat-spin" /> Restoring charts and analysis details…</div>
-                          ) : !turn.sensitiveWarning && turn.result ? (
+                          ) : !turn.sensitiveWarning && turn.result && turn.result.status !== "out_of_scope" ? (
                             <div className="chat-result-surface"><ResultWorkspace result={turn.result} /></div>
                           ) : !turn.sensitiveWarning && turn.sql ? (
                             <details className="chat-sql-details">
@@ -676,29 +700,37 @@ export default function ChatPage() {
                   ))}
                 </motion.article>
               </AnimatePresence>
+              ) : null}
+              {showPending && pending ? (
+                <motion.div className="chat-exchange chat-pending-turn" variants={messageVariants} initial="hidden" animate="visible">
+                  <div className="chat-user-message">
+                    <div className="chat-message-avatar">{username.slice(0, 1).toUpperCase() || "A"}</div>
+                    <div><span className="chat-message-label">You</span><p>{pending.question}</p></div>
+                  </div>
+                  <div className="chat-assistant-message">
+                    <div className="chat-assistant-avatar"><Sparkles size={16} /></div>
+                    <div className="chat-assistant-content">
+                      <div className="chat-assistant-heading">
+                        <span>FD AI/BI</span>
+                        <small className={`chat-status${busy ? "" : " chat-status--error"}`}>
+                          {busy ? <><LoaderCircle size={12} className="chat-spin" /> Working</> : <><TriangleAlert size={12} /> Stopped</>}
+                        </small>
+                      </div>
+                      <ExecutionProgress
+                        journey={pending.journey}
+                        domainLabel={domainLabel}
+                        onCancel={busy ? cancelQuestion : undefined}
+                        onRetry={busy ? undefined : retryPending}
+                        onDismiss={busy ? undefined : () => setPending(null)}
+                      />
+                    </div>
+                  </div>
+                </motion.div>
+              ) : null}
               <div ref={messagesEndRef} />
             </div>
           )}
         </div>
-
-        <AnimatePresence>
-          {busy && (
-            <motion.div
-              className="chat-processing-overlay"
-              role="status"
-              aria-live="polite"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
-              <div className="chat-processing-card">
-                <LoaderCircle size={26} className="chat-spin" />
-                <strong>Analyzing your question</strong>
-                <span>Checking governed data and building your results…</span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         <div className="chat-composer-zone">
           <PlanNotices notices={planUsage.usage?.notices ?? []} onDismiss={planUsage.dismiss} />
@@ -710,38 +742,47 @@ export default function ChatPage() {
               </motion.div>
             )}
           </AnimatePresence>
-          <motion.form
-            className="chat-composer"
-            onSubmit={(event) => void submitQuestion(event)}
-            animate={inputFocused ? { scale: 1.008 } : { scale: 1 }}
-            transition={{ duration: 0.2, ease: "easeInOut" }}
-          >
-            <motion.div className="chat-composer__glow" animate={{ opacity: inputFocused ? 1 : 0.45 }} transition={{ duration: 0.2 }} />
+          <form className="chat-composer ask-composer" onSubmit={(event) => void submitQuestion(event)}>
             <textarea
               ref={textareaRef}
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
-              onFocus={() => setInputFocused(true)}
-              onBlur={() => setInputFocused(false)}
               onKeyDown={handleInputKeyDown}
-              placeholder="Ask anything about your business…"
+              placeholder="Ask a question about your business data…"
               rows={1}
               maxLength={4000}
               aria-label="Ask a business analytics question"
               disabled={busy}
             />
-            <div className="chat-composer__bottom">
-              <span className="chat-composer__hint"><span>↵</span> to ask <span className="chat-composer__hint-divider">·</span> Shift + ↵ for a new line</span>
-              <div className="chat-composer__controls">
-                <span className="chat-composer__domain">{domain}</span>
-                <motion.button type="submit" className="chat-submit" disabled={busy || !question.trim()} whileHover={reduceMotion ? undefined : { scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.95 }} aria-label={busy ? "Analyzing" : "Ask"}>
-                  {busy ? <LoaderCircle size={17} className="chat-spin" /> : <Send size={16} />}
-                  <span>{busy ? "Analyzing" : "Ask"}</span>
+            <div className="ask-composer__bar">
+              <ComposerPlusMenu
+                domain={domain}
+                domainLabel={domainLabel}
+                sensitivePrompts={SENSITIVE_DEMO_PROMPTS[domain] ?? SENSITIVE_DEMO_PROMPTS.retail}
+                onPrefill={setSuggestion}
+                onSensitivePrompt={showSensitiveNotice}
+                disabled={busy}
+              />
+              <span className="ask-composer__divider" aria-hidden="true" />
+              <ComposerDomainPicker domain={domain} domains={domains} labels={DOMAIN_LABELS} onSwitch={(next) => void changeDomain(next)} disabled={busy} />
+              <span className="ask-composer__spacer" />
+              {busy ? (
+                <motion.button type="button" className="chat-submit chat-submit--stop ask-composer__send" onClick={cancelQuestion} whileTap={reduceMotion ? undefined : { scale: 0.95 }} aria-label="Stop the running analysis">
+                  <Square size={13} fill="currentColor" />
+                  <span>Stop</span>
                 </motion.button>
-              </div>
+              ) : (
+                <motion.button type="submit" className="chat-submit ask-composer__send" disabled={!question.trim()} whileHover={reduceMotion ? undefined : { scale: 1.03 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} aria-label="Ask">
+                  <Send size={17} />
+                  <span>Ask</span>
+                </motion.button>
+              )}
             </div>
-          </motion.form>
-          <p className="chat-composer-disclaimer">AI-generated analysis can be wrong. Verify important business decisions against your source data.</p>
+          </form>
+          <p className="ask-composer__note">
+            <Info size={15} />
+            <span>Answers are grounded in approved source data. Press <b>Ctrl + Enter</b> to send.</span>
+          </p>
         </div>
       </section>
       </div>

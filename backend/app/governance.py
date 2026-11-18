@@ -181,6 +181,14 @@ def chart_spec(table: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {"type": kind, "x": x, "y": y, "data": series}
 
 
+_SQL_STEP = {
+    "registry": ("Approved metric registry → compiled SQL", "Approved metric registry · compiled SQL"),
+    "ai": ("Ryze NL→SQL", "Ryze · NL→SQL"),
+    "rule_based": ("Rule-based SQL template", "Rule-based SQL template"),
+    "unrecorded": ("SQL source not recorded", "SQL · source not recorded"),
+}
+
+
 def build_lineage(
     domain: str,
     question: str,
@@ -191,7 +199,10 @@ def build_lineage(
     schema_used: list[str],
     guardrail_ok: bool,
     local_counts: dict[str, int],
+    sql_origin: str = "unrecorded",
 ) -> dict[str, Any]:
+    # Name the step that really produced the SQL: only AI-generated SQL is "NL→SQL".
+    engine_name, step_title = _SQL_STEP.get(sql_origin, _SQL_STEP["unrecorded"])
     cat = (
         databricks_domain_catalog(domain)
         if settings.warehouse == "databricks"
@@ -205,10 +216,10 @@ def build_lineage(
         return {
             "domain": domain,
             "catalog": cat,
-            "engine": "Ryze NL→SQL (Genie off)",
+            "engine": f"{engine_name} (Genie off)",
             "flow": [
                 f"{cat}.{schema}.{', '.join(tables)}",
-                "Ryze NL→SQL",
+                engine_name,
                 "Guardrails + domain-scoped read-only execution",
                 "Application query_history audit record",
             ],
@@ -223,7 +234,7 @@ def build_lineage(
             "views": [],
             "trace": [
                 {"step": 1, "title": "Question", "detail": question, "by": username},
-                {"step": 2, "title": "Ryze · NL→SQL", "detail": (sql or "")[:280]},
+                {"step": 2, "title": step_title, "detail": (sql or "")[:280]},
                 {
                     "step": 3,
                     "title": "Live source tables",
@@ -282,10 +293,10 @@ def build_lineage(
     return {
         "domain": domain,
         "catalog": cat,
-        "engine": "Ryze NL→SQL (Genie off)",
+        "engine": f"{engine_name} (Genie off)",
         "flow": [
             f"{gold_schema()}.vw_*",
-            "Ryze NL→SQL",
+            engine_name,
             "Guardrails + HITL",
             "fdryze_audit_log",
         ],
@@ -314,7 +325,7 @@ def build_lineage(
             {"step": 1, "title": "Question", "detail": question, "by": username},
             {
                 "step": 2,
-                "title": "Ryze · NL→SQL",
+                "title": step_title,
                 "detail": (sql or "")[:280],
             },
             {
@@ -344,12 +355,129 @@ def guardrail_report(sql: str | None, ok: bool, error: str | None) -> dict[str, 
     return {"ok": ok, "error": error, "checks": checks}
 
 
-def model_gov(prediction: Any, llm_provider: str | None) -> dict[str, Any]:
+_MODEL_PROVIDERS = ("google", "openai", "grok", "xai", "anthropic", "ollama")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+SQL_ORIGIN_LABELS = {
+    "registry": "approved registry template",
+    "ai": "AI-generated, then validated",
+    "rule_based": "rule-based SQL template",
+    "none": "none",
+    "unrecorded": "not recorded",
+}
+ANSWER_LABELS = {
+    "ai": "AI model",
+    "registry": "approved metric registry (template)",
+    "rule_based": "rule-based summary of the query result",
+    "knowledge": "approved knowledge base (template)",
+    "application": "application records (template)",
+    "built_in": "built-in response (no AI model)",
+}
+
+
+def _model_provider(step: dict[str, Any]) -> str | None:
+    """The provider when a step was an AI model attempt ('google:gemini-…'), else None."""
+    provider, sep, model = str(step.get("engine") or "").partition(":")
+    return provider if sep and model and provider in _MODEL_PROVIDERS else None
+
+
+def _skipped(step: dict[str, Any]) -> bool:
+    # Breaker or quota skips are recorded on the provider's engine but no request was sent.
+    return str(step.get("detail") or "").startswith("Skipped:")
+
+
+def _is_external(provider: str) -> bool:
+    if provider != "ollama":
+        return True
+    from urllib.parse import urlsplit
+
+    return (urlsplit(settings.ollama_base_url or "").hostname or "") not in _LOCAL_HOSTS
+
+
+def execution_summary(steps: list[dict[str, Any]], sql: str | None, evidence: dict[str, Any] | None) -> dict[str, Any]:
+    """What actually ran for one request, read from its recorded trace. Configuration is not consulted,
+    except to tell whether an Ollama endpoint that was really called is local or remote."""
+    evidence = evidence or {}
+    kind = evidence.get("kind")
+    calls: dict[str, dict[str, int]] = {}
+    attempts: dict[str, list[tuple[str, bool]]] = {}
+    external = False
+    for step in steps:
+        provider = _model_provider(step)
+        if provider is None:
+            continue
+        stage = str(step.get("stage") or "ai")
+        counts = calls.setdefault(stage, {"succeeded": 0, "failed": 0, "skipped": 0})
+        if _skipped(step):
+            counts["skipped"] += 1
+        else:
+            counts["succeeded" if step.get("ok") else "failed"] += 1
+            external = external or _is_external(provider)
+        attempts.setdefault(stage, []).append((provider, bool(step.get("ok")) and not _skipped(step)))
+    # A fallback: within one stage, a provider failed or was skipped and a different one then succeeded.
+    fallback = any(
+        ok and any(not earlier_ok and earlier != provider for earlier, earlier_ok in stage_attempts[:index])
+        for stage_attempts in attempts.values()
+        for index, (provider, ok) in enumerate(stage_attempts)
+    )
+
+    sql_generation = [step for step in steps if step.get("stage") == "sql_generation"]
+    if not sql:
+        sql_origin = "none"
+    elif kind == "metric":
+        sql_origin = "registry"
+    elif sql_generation:
+        last = sql_generation[-1]
+        sql_origin = "ai" if _model_provider(last) and last.get("ok") and not _skipped(last) else "rule_based"
+    else:
+        sql_origin = "unrecorded"
+
+    synthesis = [step for step in steps if step.get("stage") == "synthesis"]
+    last_synthesis = synthesis[-1] if synthesis else None
+    if last_synthesis and _model_provider(last_synthesis) and last_synthesis.get("ok") and not _skipped(last_synthesis):
+        answer = "ai"
+    elif kind in {"metric", "registry"}:
+        answer = "registry"
+    elif last_synthesis and last_synthesis.get("engine") == "deterministic summary of the query result":
+        answer = "rule_based"
+    elif kind in {"knowledge", "application"}:
+        answer = kind
+    else:
+        answer = "built_in"
+
+    prediction = [step for step in steps if step.get("stage") == "prediction" and step.get("ok")]
     return {
-        "prediction_runtime": "self-hosted TabPFN" if prediction else "not invoked",
-        "external_ml_api": False,
+        "answer_generated_by": answer,
+        "sql_origin": sql_origin,
+        "ai_model_calls": calls,
+        "fallback_used": fallback,
+        "external_ai_service_called": external,
+        "prediction_engine": str(prediction[-1].get("engine")) if prediction else None,
+    }
+
+
+def _describe_calls(calls: dict[str, dict[str, int]]) -> str:
+    if not calls:
+        return "none"
+    parts = []
+    for stage, counts in calls.items():
+        detail = ", ".join(f"{count} {state}" for state, count in counts.items() if count)
+        parts.append(f"{stage.replace('_', ' ')}: {detail}")
+    return "; ".join(parts)
+
+
+def model_gov(prediction: Any, execution: dict[str, Any]) -> dict[str, Any]:
+    """Governance facts for one answer, every one of them from what the request actually did."""
+    return {
+        "answer_generated_by": ANSWER_LABELS[execution["answer_generated_by"]],
+        "sql_origin": SQL_ORIGIN_LABELS[execution["sql_origin"]],
+        "ai_model_calls": _describe_calls(execution["ai_model_calls"]),
+        "fallback_used": execution["fallback_used"],
+        "external_ai_service_called": execution["external_ai_service_called"],
+        "prediction_runtime": (execution.get("prediction_engine") or "self-hosted forecasting model") if prediction else "not invoked",
+        # Forecasts run on the self-hosted TabPFN package or the statistical baseline; no external API exists.
+        "external_forecasting_model": False,
         "genie": False,
-        "llm": llm_provider or "heuristic fallback",
         "pii_policy": "masked at silver / gold view",
         "approval": "HITL required for prediction outputs",
     }

@@ -19,6 +19,28 @@ _trace: ContextVar[list[dict[str, Any]] | None] = ContextVar("ryze_llm_trace", d
 _call_info: ContextVar[dict[str, Any] | None] = ContextVar("ryze_llm_call_info", default=None)
 # Says why a stage may not use a model under the user's plan; None when it may.
 _usage_gate: ContextVar[Callable[[str], str | None] | None] = ContextVar("ryze_llm_usage_gate", default=None)
+# Receives progress events while a streamed Ask AI request runs. Never set for ordinary requests.
+_progress: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("ryze_progress", default=None)
+
+
+@contextmanager
+def progress_listener(listener: Callable[[dict[str, Any]], None]) -> Iterator[None]:
+    token = _progress.set(listener)
+    try:
+        yield
+    finally:
+        _progress.reset(token)
+
+
+def report_progress(event: dict[str, Any]) -> None:
+    """Tell a streaming client that a stage really happened. Progress never affects the answer."""
+    listener = _progress.get()
+    if listener is None:
+        return
+    try:
+        listener(event)
+    except Exception:  # A disconnected client must not fail the analysis.
+        logger.debug("Progress listener failed", exc_info=True)
 
 
 @contextmanager
@@ -50,6 +72,8 @@ def record_step(
         "latency_ms": round(latency_ms) if latency_ms is not None else None,
         **extra,
     })
+    # Only the stage name and outcome: engines, models and details stay in the audited trace.
+    report_progress({"type": "step", "stage": stage, "ok": ok})
 
 
 @contextmanager

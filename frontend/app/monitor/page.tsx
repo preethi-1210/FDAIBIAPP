@@ -1,14 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Clock3, LoaderCircle, RefreshCw, ShieldAlert } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, Clock3, LoaderCircle, RefreshCw, ShieldAlert, UserCheck, XCircle } from "lucide-react";
 import { Shell } from "@/components/Shell";
 import { api } from "@/lib/api";
 
 type ActivityRow = {
-  audit_id: string;
+  audit_id: string | null;
   question: string;
-  status: "passed" | "blocked";
+  status: "passed" | "failed" | "blocked" | "review";
+  reason?: string | null;
   rows: number;
   created_at: string;
 };
@@ -21,6 +22,14 @@ type MonitorData = {
   guardrail_blocks: number;
   pending_reviews: number;
   activities: ActivityRow[];
+};
+
+const STATUS_LABELS: Record<ActivityRow["status"], string> = { passed: "passed", failed: "failed", blocked: "blocked", review: "in review" };
+const STATUS_ICONS: Record<ActivityRow["status"], React.ReactNode> = {
+  passed: <CheckCircle2 size={13} />,
+  failed: <XCircle size={13} />,
+  blocked: <ShieldAlert size={13} />,
+  review: <UserCheck size={13} />,
 };
 
 export default function MonitorPage() {
@@ -90,10 +99,13 @@ export default function MonitorPage() {
                     <thead><tr><th>Question</th><th>Audit ID</th><th>Status</th><th>Rows</th><th>Created</th></tr></thead>
                     <tbody>
                       {data.activities.map((item) => (
-                        <tr key={item.audit_id}>
+                        <tr key={`${item.audit_id ?? "none"}-${item.created_at}`}>
                           <td className="platform-question">{item.question}</td>
-                          <td>{item.audit_id}</td>
-                          <td><span className={`platform-status platform-status--${item.status}`}>{item.status === "passed" ? <CheckCircle2 size={13} /> : <ShieldAlert size={13} />}{item.status}</span></td>
+                          <td>{item.audit_id ?? <span className="platform-muted">No audit files</span>}</td>
+                          <td>
+                            <span className={`platform-status platform-status--${item.status}`}>{STATUS_ICONS[item.status]}{STATUS_LABELS[item.status]}</span>
+                            {item.reason ? <small className="platform-status-reason">{item.reason}</small> : null}
+                          </td>
                           <td>{item.rows}</td>
                           <td>{new Date(item.created_at).toLocaleString()}</td>
                         </tr>
